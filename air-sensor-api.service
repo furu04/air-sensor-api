@@ -1,0 +1,47 @@
+[Unit]
+Description=air-sensor-api (ENS160 + AHT21)
+Documentation=https://github.com/furu04/air-sensor-api
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/air-sensor-api
+Environment=LISTEN_ADDR=127.0.0.1:8080
+Environment=INTERVAL=60s
+Environment=TEMP_OFFSET=0
+EnvironmentFile=-/etc/air-sensor-api/env
+User=air-sensor
+Group=air-sensor
+SupplementaryGroups=i2c
+Restart=on-failure
+RestartSec=10
+
+NoNewPrivileges=true
+CapabilityBoundingSet=
+AmbientCapabilities=
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+ProtectProc=invisible
+ProcSubset=pid
+LockPersonality=true
+MemoryDenyWriteExecute=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+RestrictNamespaces=true
+RestrictAddressFamilies=AF_INET AF_INET6
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources
+UMask=0077
+DevicePolicy=closed
+DeviceAllow=char-i2c rw
+
+[Install]
+WantedBy=multi-user.target

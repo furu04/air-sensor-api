@@ -1,0 +1,6 @@
+/air-sensor-api
+*.test
+*.out
+dist/
+.claude/
+.env*
