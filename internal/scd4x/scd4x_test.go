@@ -5,6 +5,7 @@ package scd4x
 
 import (
 	"errors"
+	"math"
 	"syscall"
 	"testing"
 	"time"
@@ -108,7 +109,7 @@ func TestReadCO2(t *testing.T) {
 		if err := s.Init(); err != nil {
 			t.Fatal(err)
 		}
-		got, err := s.ReadCO2()
+		got, err := readCO2(s)
 		if err != nil || got != ppm {
 			t.Fatalf("ppm=%d got=%d err=%v", ppm, got, err)
 		}
@@ -124,7 +125,7 @@ func TestReadCO2NotReadyThenReady(t *testing.T) {
 		t.Fatal(err)
 	}
 	sl = nil
-	got, err := s.ReadCO2()
+	got, err := readCO2(s)
 	if err != nil || got != 800 {
 		t.Fatalf("got=%d err=%v", got, err)
 	}
@@ -142,7 +143,7 @@ func TestReadCO2NeverReady(t *testing.T) {
 		t.Fatal(err)
 	}
 	sl = nil
-	if _, err := s.ReadCO2(); !errors.Is(err, ErrNotReady) {
+	if _, err := readCO2(s); !errors.Is(err, ErrNotReady) {
 		t.Fatalf("err=%v", err)
 	}
 	if n := sl.count(pollInterval); n != pollAttempts-1 {
@@ -164,7 +165,7 @@ func TestReadCO2BadCRC(t *testing.T) {
 		t.Fatal(err)
 	}
 	sim.SetSCDBadCRC(true)
-	if _, err := s.ReadCO2(); !errors.Is(err, ErrCRC) {
+	if _, err := readCO2(s); !errors.Is(err, ErrCRC) {
 		t.Fatalf("err=%v", err)
 	}
 }
@@ -176,7 +177,7 @@ func TestReadCO2OutOfRange(t *testing.T) {
 	if err := s.Init(); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.ReadCO2(); !errors.Is(err, ErrOutOfRange) {
+	if _, err := readCO2(s); !errors.Is(err, ErrOutOfRange) {
 		t.Fatalf("err=%v", err)
 	}
 }
@@ -188,7 +189,7 @@ func TestReadCO2Unplugged(t *testing.T) {
 		t.Fatal(err)
 	}
 	sim.SetUnplugged(true)
-	if _, err := s.ReadCO2(); !errors.Is(err, syscall.EREMOTEIO) {
+	if _, err := readCO2(s); !errors.Is(err, syscall.EREMOTEIO) {
 		t.Fatalf("err=%v", err)
 	}
 }
@@ -199,7 +200,7 @@ func TestNeverUsesRepeatedStart(t *testing.T) {
 	if err := s.Init(); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.ReadCO2(); err != nil {
+	if _, err := readCO2(s); err != nil {
 		t.Fatal(err)
 	}
 	for _, r := range sim.Reads() {
@@ -228,7 +229,44 @@ func TestShortRead(t *testing.T) {
 		t.Fatal("expected error for short serial read")
 	}
 	s = New(shortBus{n: 2}, DefaultAddr, func(time.Duration) {})
-	if _, err := s.ReadCO2(); err == nil {
+	if _, err := readCO2(s); err == nil {
 		t.Fatal("expected error for short ready read")
+	}
+}
+
+func readCO2(s *Sensor) (int, error) {
+	m, err := s.Read()
+	return m.CO2PPM, err
+}
+
+func TestReadClimate(t *testing.T) {
+	tests := []struct{ temp, rh float64 }{{25, 50}, {-10, 5}, {40, 95}, {0, 0}}
+	for _, tt := range tests {
+		sim := newSim()
+		sim.SetSCDClimate(tt.temp, tt.rh)
+		s := New(sim, DefaultAddr, func(time.Duration) {})
+		if err := s.Init(); err != nil {
+			t.Fatal(err)
+		}
+		m, err := s.Read()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if math.Abs(m.TempC-tt.temp) > 0.01 || math.Abs(m.RHPct-tt.rh) > 0.01 {
+			t.Errorf("want %v/%v got %+v", tt.temp, tt.rh, m)
+		}
+	}
+}
+
+func TestConversionBounds(t *testing.T) {
+	sim := newSim()
+	s := New(sim, DefaultAddr, func(time.Duration) {})
+	if err := s.Init(); err != nil {
+		t.Fatal(err)
+	}
+	sim.SetSCDClimate(130, 100)
+	m, err := s.Read()
+	if err != nil || math.Abs(m.TempC-130) > 0.01 || math.Abs(m.RHPct-100) > 0.01 {
+		t.Fatalf("%+v %v", m, err)
 	}
 }

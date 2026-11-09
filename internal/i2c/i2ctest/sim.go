@@ -65,6 +65,8 @@ type Sim struct {
 	scdPending   uint16
 	scdNotReady  int
 	scdCO2       int
+	scdTempRaw   uint16
+	scdRHRaw     uint16
 	scdBadCRC    bool
 
 	writes    []WriteCall
@@ -81,6 +83,7 @@ func New() *Sim {
 	s.SetClimate(25.0, 50.0)
 	s.SetGas(1, 0, 400, 0)
 	s.scdCO2 = 800
+	s.SetSCDClimate(25.0, 50.0)
 	return s
 }
 
@@ -147,6 +150,12 @@ func (s *Sim) EnableSCD4x() {
 func (s *Sim) SetCO2(ppm int) {
 	defer s.lock()()
 	s.scdCO2 = ppm
+}
+
+func (s *Sim) SetSCDClimate(tempC, rhPct float64) {
+	defer s.lock()()
+	s.scdTempRaw = uint16((tempC + 45) / 175 * 65535)
+	s.scdRHRaw = uint16(rhPct / 100 * 65535)
 }
 
 func (s *Sim) SetSCDNotReady(polls int) {
@@ -379,7 +388,7 @@ func (s *Sim) scdRead(n int) ([]byte, error) {
 		if s.scdNotReady > 0 {
 			return nil, s.nack()
 		}
-		words = []uint16{uint16(s.scdCO2), 0x6667, 0x8000}
+		words = []uint16{uint16(s.scdCO2), s.scdTempRaw, s.scdRHRaw}
 	default:
 		return nil, s.nack()
 	}

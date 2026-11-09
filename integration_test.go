@@ -234,10 +234,10 @@ func TestIntegrationSCD4xOnly(t *testing.T) {
 	sm, get := newStack(t, sim, api.Config{SCD4xAddr: 0x62}, sampler.WithSCD4x(0x62))
 	sm.Tick()
 	m := get("/v1/readings/latest")
-	if m["co2_ppm"] != 780.0 || m["valid"] != true {
+	if m["co2_ppm"] != 780.0 || m["valid"] != true || m["temp_c"] != 25.0 || m["rh_pct"] != 50.0 {
 		t.Fatalf("%v", m)
 	}
-	for _, k := range []string{"temp_c", "rh_pct", "aqi", "tvoc_ppb", "eco2_ppm", "validity", "validity_name"} {
+	for _, k := range []string{"aqi", "tvoc_ppb", "eco2_ppm", "validity", "validity_name"} {
 		if _, ok := m[k]; ok {
 			t.Errorf("unexpected key %s", k)
 		}
@@ -291,5 +291,20 @@ func TestIntegrationAHT21WithSCD4x(t *testing.T) {
 	}
 	if _, ok := m["aqi"]; ok {
 		t.Errorf("aqi present without ENS160: %v", m)
+	}
+}
+
+func TestIntegrationSCD4xClimateWithTempOffset(t *testing.T) {
+	sim := i2ctest.New()
+	sim.EnableSCD4x()
+	sim.SetSCDClimate(27.0, 38.0)
+	clock := store.NewSystemClock()
+	st := store.New(10, clock)
+	open := sampler.NewOpener(func() (i2c.Bus, error) { return sim, nil }, func(time.Duration) {}, sampler.WithSCD4x(0x62))
+	sm := sampler.New(open, st, sampler.Config{Interval: 10 * time.Second, TempOffset: -3}, clock, nil)
+	sm.Tick()
+	rd, ok := st.Latest()
+	if !ok || rd.TempC != 24 || rd.RHPct != 38 || !rd.HasClimate {
+		t.Fatalf("%+v %v", rd, ok)
 	}
 }

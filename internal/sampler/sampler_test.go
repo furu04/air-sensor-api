@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"math"
 	"strings"
 	"sync"
 	"testing"
@@ -458,7 +459,7 @@ func TestNewOpenerSCD4xOnly(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if sess.Climate() != nil || sess.Gas() != nil || sess.CO2() == nil {
+	if sess.Climate() == nil || sess.Gas() != nil || sess.CO2() == nil {
 		t.Fatalf("climate=%v gas=%v co2=%v", sess.Climate(), sess.Gas(), sess.CO2())
 	}
 	for _, w := range sim.Writes() {
@@ -563,3 +564,111 @@ type co2Only struct{ *fakeCO2Session }
 
 func (co2Only) Climate() ClimateSource { return nil }
 func (co2Only) Gas() GasSource         { return nil }
+
+func readMeasurementCount(sim *i2ctest.Sim) int {
+	n := 0
+	for _, w := range sim.Writes() {
+		if w.Addr == 0x62 && len(w.Data) == 2 && w.Data[0] == 0xEC && w.Data[1] == 0x05 {
+			n++
+		}
+	}
+	return n
+}
+
+func simHarness(sim *i2ctest.Sim, offset float64, opts ...OpenerOption) *harness {
+	h := newHarness(offset)
+	open := NewOpener(func() (i2c.Bus, error) { return sim, nil }, func(time.Duration) {}, opts...)
+	h.sm.open = open
+	return h
+}
+
+func TestSCD4xSuppliesClimateWhenAHT21Disabled(t *testing.T) {
+	sim := i2ctest.New()
+	sim.EnableSCD4x()
+	sim.SetSCDClimate(24.0, 41.0)
+	sim.SetCO2(910)
+	h := simHarness(sim, -1.5, WithSCD4x(0x62))
+	h.tick()
+	r, ok := h.st.Latest()
+	if !ok || !r.HasClimate || !r.HasCO2 || r.CO2PPM != 910 {
+		t.Fatalf("%+v", r)
+	}
+	if r.TempC != 22.5 || r.RHPct != 41 {
+		t.Fatalf("temp=%v rh=%v", r.TempC, r.RHPct)
+	}
+}
+
+func TestSCD4xReadOncePerTick(t *testing.T) {
+	sim := i2ctest.New()
+	sim.EnableSCD4x()
+	h := simHarness(sim, 0, WithSCD4x(0x62))
+	for i := 1; i <= 3; i++ {
+		h.tick()
+		if n := readMeasurementCount(sim); n != i {
+			t.Fatalf("tick %d: read_measurement x%d", i, n)
+		}
+	}
+}
+
+func TestAHT21WinsOverSCD4xClimate(t *testing.T) {
+	sim := i2ctest.New()
+	sim.EnableSCD4x()
+	sim.SetClimate(21, 55)
+	sim.SetSCDClimate(30, 20)
+	sim.SetCO2(700)
+	h := simHarness(sim, 0, WithAHT21(0x38, true), WithENS160(0x53), WithSCD4x(0x62))
+	h.tick()
+	r, ok := h.st.Latest()
+	if !ok || r.TempC != 21 || r.RHPct != 55 || r.CO2PPM != 700 {
+		t.Fatalf("%+v", r)
+	}
+	if n := readMeasurementCount(sim); n != 1 {
+		t.Fatalf("read_measurement x%d", n)
+	}
+}
+
+func TestENS160CompensatedFromSCD4xClimate(t *testing.T) {
+	sim := i2ctest.New()
+	sim.EnableSCD4x()
+	sim.SetSCDClimate(20, 40)
+	h := simHarness(sim, 0, WithENS160(0x53), WithSCD4x(0x62))
+	h.tick()
+	tin, rhin := sim.Compensation()
+	if wantT := uint16(math.Round((20 + 273.15) * 64)); tin < wantT-2 || tin > wantT+2 {
+		t.Fatalf("temp comp=%d want ~%d", tin, wantT)
+	}
+	if wantRH := uint16(40 * 512); rhin < wantRH-40 || rhin > wantRH+40 {
+		t.Fatalf("rh comp=%d want ~%d", rhin, wantRH)
+	}
+}
+
+func TestSCD4xSampleNotReusedAfterLaterFailure(t *testing.T) {
+	sim := i2ctest.New()
+	sim.EnableSCD4x()
+	sim.SetCO2(500)
+	h := simHarness(sim, 0, WithENS160(0x53), WithSCD4x(0x62))
+	sim.SetStatusError(true)
+	h.tick()
+	if h.st.Len() != 0 {
+		t.Fatal("stored despite ENS160 failure")
+	}
+	sim.SetStatusError(false)
+	sim.SetCO2(1200)
+	h.tick()
+	r, ok := h.st.Latest()
+	if !ok || r.CO2PPM != 1200 {
+		t.Fatalf("%+v", r)
+	}
+}
+
+func TestSCD4xMeasureFailure(t *testing.T) {
+	sim := i2ctest.New()
+	sim.EnableSCD4x()
+	h := simHarness(sim, 0, WithSCD4x(0x62))
+	h.tick()
+	sim.SetSCDBadCRC(true)
+	h.tick()
+	if h.st.Len() != 1 || h.sm.Snapshot().ConsecutiveFailures != 1 {
+		t.Fatalf("len=%d snap=%+v", h.st.Len(), h.sm.Snapshot())
+	}
+}

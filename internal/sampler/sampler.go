@@ -64,6 +64,34 @@ func (s *session) Gas() GasSource         { return s.gas }
 func (s *session) CO2() CO2Source         { return s.co2 }
 func (s *session) Close() error           { return s.bus.Close() }
 
+type scdSource struct {
+	sensor *scd4x.Sensor
+	cached scd4x.Measurement
+	has    bool
+}
+
+func (s *scdSource) Measure() (float64, float64, error) {
+	s.has = false
+	m, err := s.sensor.Read()
+	if err != nil {
+		return 0, 0, err
+	}
+	s.cached, s.has = m, true
+	return m.TempC, m.RHPct, nil
+}
+
+func (s *scdSource) ReadCO2() (int, error) {
+	if s.has {
+		s.has = false
+		return s.cached.CO2PPM, nil
+	}
+	m, err := s.sensor.Read()
+	if err != nil {
+		return 0, err
+	}
+	return m.CO2PPM, nil
+}
+
 type openerOptions struct {
 	aht21     bool
 	ahtAddr   uint8
@@ -128,7 +156,11 @@ func NewOpener(open func() (i2c.Bus, error), sleep func(time.Duration), opts ...
 				bus.Close()
 				return nil, fmt.Errorf("init scd4x: %w", err)
 			}
-			sess.co2 = scd
+			src := &scdSource{sensor: scd}
+			sess.co2 = src
+			if sess.climate == nil {
+				sess.climate = src
+			}
 		}
 		return sess, nil
 	}

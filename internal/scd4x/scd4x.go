@@ -34,6 +34,12 @@ var (
 	ErrOutOfRange = errors.New("co2 out of range")
 )
 
+type Measurement struct {
+	CO2PPM int
+	TempC  float64
+	RHPct  float64
+}
+
 type Sensor struct {
 	bus   i2c.Bus
 	addr  uint8
@@ -97,12 +103,12 @@ func (s *Sensor) dataReady() (bool, error) {
 	return w[0]&0x07FF != 0, nil
 }
 
-func (s *Sensor) ReadCO2() (int, error) {
+func (s *Sensor) Read() (Measurement, error) {
 	ready := false
 	for i := 0; i < pollAttempts; i++ {
 		ok, err := s.dataReady()
 		if err != nil {
-			return 0, err
+			return Measurement{}, err
 		}
 		if ok {
 			ready = true
@@ -113,15 +119,19 @@ func (s *Sensor) ReadCO2() (int, error) {
 		}
 	}
 	if !ready {
-		return 0, fmt.Errorf("scd4x: %w", ErrNotReady)
+		return Measurement{}, fmt.Errorf("scd4x: %w", ErrNotReady)
 	}
 	w, err := s.query(cmdReadMeasure, 3)
 	if err != nil {
-		return 0, err
+		return Measurement{}, err
 	}
 	co2 := int(w[0])
 	if co2 > maxCO2PPM {
-		return 0, fmt.Errorf("scd4x: %d ppm: %w", co2, ErrOutOfRange)
+		return Measurement{}, fmt.Errorf("scd4x: %d ppm: %w", co2, ErrOutOfRange)
 	}
-	return co2, nil
+	return Measurement{
+		CO2PPM: co2,
+		TempC:  -45 + 175*float64(w[1])/65535,
+		RHPct:  100 * float64(w[2]) / 65535,
+	}, nil
 }
