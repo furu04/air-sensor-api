@@ -20,11 +20,13 @@ var epoch = time.Date(2026, 11, 3, 0, 0, 0, 0, time.UTC)
 
 func reading(i int) Reading {
 	return Reading{
-		Wall:    epoch.Add(time.Duration(i) * time.Minute),
-		Mono:    time.Duration(i) * time.Minute,
-		TempC:   float64(i),
-		AQI:     1,
-		TVOCPPB: i,
+		Wall:       epoch.Add(time.Duration(i) * time.Minute),
+		Mono:       time.Duration(i) * time.Minute,
+		HasClimate: true,
+		TempC:      float64(i),
+		HasGas:     true,
+		AQI:        1,
+		TVOCPPB:    i,
 	}
 }
 
@@ -125,8 +127,11 @@ func TestValidityName(t *testing.T) {
 			t.Fatalf("%d: %s", i, got)
 		}
 	}
-	if !(Reading{}).Valid() || (Reading{Validity: 1}).Valid() {
+	if !(Reading{HasGas: true}).Valid() || (Reading{HasGas: true, Validity: 1}).Valid() {
 		t.Fatal("Valid")
+	}
+	if !(Reading{Validity: 1}).Valid() {
+		t.Fatal("reading without a gas sensor must be valid")
 	}
 }
 

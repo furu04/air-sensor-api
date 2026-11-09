@@ -7,33 +7,61 @@ import (
 	"fmt"
 	"math"
 	"net"
+	"os"
 	"strconv"
 	"time"
+
+	"github.com/furu04/air-sensor-api/internal/scd4x"
 )
 
 type Config struct {
-	ListenAddr  string
-	I2CBus      int
-	ENS160Addr  uint8
-	AHT21Addr   uint8
-	Interval    time.Duration
-	TempOffset  float64
-	HistorySize int
-	StaleAfter  time.Duration
-	NoCRC       bool
-	APIToken    string
+	ListenAddr   string
+	I2CBus       int
+	AHT21Enable  bool
+	ENS160Enable bool
+	SCD4xEnable  bool
+	ENS160Addr   uint8
+	AHT21Addr    uint8
+	Interval     time.Duration
+	TempOffset   float64
+	HistorySize  int
+	StaleAfter   time.Duration
+	NoCRC        bool
+	APIToken     string
 }
 
 func Load(getenv func(string) string) (Config, error) {
-	get := func(key string) string { return getenv(key) }
+	return LoadWith(getenv, os.ReadFile)
+}
+
+func LoadWith(getenv func(string) string, readFile func(string) ([]byte, error)) (Config, error) {
+	var fileVals map[string]string
+	if path := getenv("CONFIG_FILE"); path != "" {
+		data, err := readFile(path)
+		if err != nil {
+			return Config{}, fmt.Errorf("CONFIG_FILE: %v", err)
+		}
+		fileVals, err = parseFile(data)
+		if err != nil {
+			return Config{}, fmt.Errorf("CONFIG_FILE: %s: %v", path, err)
+		}
+	}
+	get := func(key string) string {
+		if v := getenv(key); v != "" {
+			return v
+		}
+		return fileVals[key]
+	}
 
 	cfg := Config{
-		ListenAddr:  "127.0.0.1:8080",
-		I2CBus:      1,
-		ENS160Addr:  0x53,
-		AHT21Addr:   0x38,
-		Interval:    60 * time.Second,
-		HistorySize: 1440,
+		ListenAddr:   "127.0.0.1:8080",
+		I2CBus:       1,
+		AHT21Enable:  true,
+		ENS160Enable: true,
+		ENS160Addr:   0x53,
+		AHT21Addr:    0x38,
+		Interval:     60 * time.Second,
+		HistorySize:  1440,
 	}
 
 	if v := get("LISTEN_ADDR"); v != "" {
@@ -49,6 +77,26 @@ func Load(getenv func(string) string) (Config, error) {
 			return Config{}, fmt.Errorf("I2C_BUS: %d out of range 0-255", n)
 		}
 		cfg.I2CBus = n
+	}
+
+	for _, e := range []struct {
+		key string
+		dst *bool
+	}{
+		{"AHT21_ENABLE", &cfg.AHT21Enable},
+		{"ENS160_ENABLE", &cfg.ENS160Enable},
+		{"SCD4X_ENABLE", &cfg.SCD4xEnable},
+	} {
+		if v := get(e.key); v != "" {
+			b, err := strconv.ParseBool(v)
+			if err != nil {
+				return Config{}, fmt.Errorf("%s: %v", e.key, err)
+			}
+			*e.dst = b
+		}
+	}
+	if !cfg.AHT21Enable && !cfg.ENS160Enable && !cfg.SCD4xEnable {
+		return Config{}, fmt.Errorf("sensors: at least one sensor must be enabled")
 	}
 
 	if v := get("ENS160_ADDR"); v != "" {
@@ -72,8 +120,11 @@ func Load(getenv func(string) string) (Config, error) {
 		}
 		cfg.AHT21Addr = uint8(n)
 	}
-	if cfg.AHT21Addr == cfg.ENS160Addr {
+	if cfg.AHT21Enable && cfg.ENS160Enable && cfg.AHT21Addr == cfg.ENS160Addr {
 		return Config{}, fmt.Errorf("AHT21_ADDR: 0x%02X conflicts with ENS160_ADDR", cfg.AHT21Addr)
+	}
+	if cfg.AHT21Enable && cfg.SCD4xEnable && cfg.AHT21Addr == scd4x.DefaultAddr {
+		return Config{}, fmt.Errorf("AHT21_ADDR: 0x%02X conflicts with SCD4X (0x%02X)", cfg.AHT21Addr, scd4x.DefaultAddr)
 	}
 
 	if v := get("INTERVAL"); v != "" {
@@ -135,7 +186,7 @@ func Load(getenv func(string) string) (Config, error) {
 		cfg.NoCRC = b
 	}
 
-	if v := get("API_TOKEN"); v != "" {
+	if v := getenv("API_TOKEN"); v != "" {
 		if len(v) < 16 {
 			return Config{}, fmt.Errorf("API_TOKEN: must be at least 16 characters")
 		}

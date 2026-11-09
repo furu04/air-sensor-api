@@ -1,14 +1,11 @@
 [Unit]
-Description=air-sensor-api (ENS160 + AHT21)
+Description=air-sensor-api (ENS160 / AHT21 / SCD4x)
 Documentation=https://github.com/furu04/air-sensor-api
 After=network.target
 
 [Service]
 Type=simple
 ExecStart=/usr/local/bin/air-sensor-api
-Environment=LISTEN_ADDR=127.0.0.1:8080
-Environment=INTERVAL=60s
-Environment=TEMP_OFFSET=0
 EnvironmentFile=-/etc/air-sensor-api/env
 User=air-sensor
 Group=air-sensor

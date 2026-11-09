@@ -65,6 +65,9 @@ func (s *fakeSession) Compensate(t, rh float64) error {
 }
 func (s *fakeSession) ReadGas() (ens160.Data, error) { return s.gas, s.gasErr }
 func (s *fakeSession) Close() error                  { s.closeCalls++; return nil }
+func (s *fakeSession) Climate() ClimateSource        { return s }
+func (s *fakeSession) Gas() GasSource                { return s }
+func (s *fakeSession) CO2() CO2Source                { return nil }
 
 type harness struct {
 	sm       *Sampler
@@ -308,7 +311,7 @@ func TestNewOpener(t *testing.T) {
 	sim := i2ctest.New()
 	sim.SetClimate(25, 50)
 	sim.SetGas(3, 300, 400, 0)
-	open := NewOpener(func() (i2c.Bus, error) { return sim, nil }, 0x38, 0x53, true, func(time.Duration) {})
+	open := NewOpener(func() (i2c.Bus, error) { return sim, nil }, func(time.Duration) {}, WithAHT21(0x38, true), WithENS160(0x53))
 	sess, err := open()
 	if err != nil {
 		t.Fatal(err)
@@ -316,13 +319,16 @@ func TestNewOpener(t *testing.T) {
 	if sim.OpMode() != 0x02 {
 		t.Fatalf("opmode=%x", sim.OpMode())
 	}
-	if _, _, err := sess.Measure(); err != nil {
+	if sess.CO2() != nil {
+		t.Fatal("CO2 source present although SCD4x not requested")
+	}
+	if _, _, err := sess.Climate().Measure(); err != nil {
 		t.Fatal(err)
 	}
-	if err := sess.Compensate(25, 50); err != nil {
+	if err := sess.Gas().Compensate(25, 50); err != nil {
 		t.Fatal(err)
 	}
-	d, err := sess.ReadGas()
+	d, err := sess.Gas().ReadGas()
 	if err != nil || d.AQI != 3 || d.TVOCPPB != 300 {
 		t.Fatalf("%+v %v", d, err)
 	}
@@ -334,7 +340,7 @@ func TestNewOpener(t *testing.T) {
 func TestNewOpenerPartIDMismatch(t *testing.T) {
 	sim := i2ctest.New()
 	sim.SetPartID(0x0161)
-	open := NewOpener(func() (i2c.Bus, error) { return sim, nil }, 0x38, 0x53, true, func(time.Duration) {})
+	open := NewOpener(func() (i2c.Bus, error) { return sim, nil }, func(time.Duration) {}, WithAHT21(0x38, true), WithENS160(0x53))
 	sess, err := open()
 	if err == nil || sess != nil {
 		t.Fatalf("sess=%v err=%v", sess, err)
@@ -345,9 +351,215 @@ func TestNewOpenerPartIDMismatch(t *testing.T) {
 }
 
 func TestNewOpenerBusFailure(t *testing.T) {
-	open := NewOpener(func() (i2c.Bus, error) { return nil, errors.New("no bus") }, 0x38, 0x53, true, func(time.Duration) {})
+	open := NewOpener(func() (i2c.Bus, error) { return nil, errors.New("no bus") }, func(time.Duration) {}, WithAHT21(0x38, true), WithENS160(0x53))
 	sess, err := open()
 	if err == nil || sess != nil {
 		t.Fatalf("sess=%v err=%v", sess, err)
 	}
 }
+
+type fakeCO2Session struct {
+	*fakeSession
+	co2    int
+	co2Err error
+	calls  int
+}
+
+func (s *fakeCO2Session) ReadCO2() (int, error) { s.calls++; return s.co2, s.co2Err }
+func (s *fakeCO2Session) CO2() CO2Source        { return s }
+
+func newCO2Harness() (*harness, *fakeCO2Session) {
+	h := newHarness(0)
+	cs := &fakeCO2Session{fakeSession: h.sess, co2: 812}
+	h.sm.open = func() (Session, error) { h.opens++; return cs, nil }
+	return h, cs
+}
+
+func TestCO2Stored(t *testing.T) {
+	h, cs := newCO2Harness()
+	h.tick()
+	r, ok := h.st.Latest()
+	if !ok || !r.HasCO2 || r.CO2PPM != 812 || cs.calls != 1 {
+		t.Fatalf("%+v calls=%d", r, cs.calls)
+	}
+}
+
+func TestCO2ZeroIsStored(t *testing.T) {
+	h, cs := newCO2Harness()
+	cs.co2 = 0
+	h.tick()
+	r, _ := h.st.Latest()
+	if !r.HasCO2 || r.CO2PPM != 0 {
+		t.Fatalf("%+v", r)
+	}
+}
+
+func TestNoCO2WithoutReader(t *testing.T) {
+	h := newHarness(0)
+	h.tick()
+	r, _ := h.st.Latest()
+	if r.HasCO2 || r.CO2PPM != 0 {
+		t.Fatalf("%+v", r)
+	}
+}
+
+func TestCO2Failure(t *testing.T) {
+	h, cs := newCO2Harness()
+	cs.co2Err = errors.New("scd4x: crc mismatch")
+	h.tick()
+	if h.st.Len() != 0 {
+		t.Fatal("reading stored despite CO2 failure")
+	}
+	snap := h.sm.Snapshot()
+	if snap.ConsecutiveFailures != 1 || !strings.Contains(snap.LastError, "scd4x") {
+		t.Fatalf("%+v", snap)
+	}
+}
+
+func TestCO2FailureTriggersReinit(t *testing.T) {
+	h, cs := newCO2Harness()
+	cs.co2Err = errors.New("scd4x: measurement not ready")
+	for i := 0; i < reinitEvery; i++ {
+		h.tick()
+	}
+	if h.sm.Snapshot().Reinits != 1 || cs.closeCalls != 1 {
+		t.Fatalf("%+v close=%d", h.sm.Snapshot(), cs.closeCalls)
+	}
+}
+
+func opener(sim *i2ctest.Sim, opts ...OpenerOption) OpenFunc {
+	return NewOpener(func() (i2c.Bus, error) { return sim, nil }, func(time.Duration) {}, opts...)
+}
+
+func TestNewOpenerWithSCD4x(t *testing.T) {
+	sim := i2ctest.New()
+	sim.EnableSCD4x()
+	sim.SetCO2(1500)
+	sess, err := opener(sim, WithAHT21(0x38, true), WithENS160(0x53), WithSCD4x(0x62))()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sess.Climate() == nil || sess.Gas() == nil || sess.CO2() == nil {
+		t.Fatal("missing source")
+	}
+	ppm, err := sess.CO2().ReadCO2()
+	if err != nil || ppm != 1500 {
+		t.Fatalf("ppm=%d err=%v", ppm, err)
+	}
+	if err := sess.Close(); err != nil || sim.CloseCount() != 1 {
+		t.Fatalf("close=%d err=%v", sim.CloseCount(), err)
+	}
+}
+
+func TestNewOpenerSCD4xOnly(t *testing.T) {
+	sim := i2ctest.New()
+	sim.EnableSCD4x()
+	sess, err := opener(sim, WithSCD4x(0x62))()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sess.Climate() != nil || sess.Gas() != nil || sess.CO2() == nil {
+		t.Fatalf("climate=%v gas=%v co2=%v", sess.Climate(), sess.Gas(), sess.CO2())
+	}
+	for _, w := range sim.Writes() {
+		if w.Addr != 0x62 {
+			t.Fatalf("touched disabled sensor: %+v", w)
+		}
+	}
+	for _, r := range sim.Reads() {
+		if r.Addr != 0x62 {
+			t.Fatalf("touched disabled sensor: %+v", r)
+		}
+	}
+}
+
+func TestNewOpenerOmitsDisabled(t *testing.T) {
+	sim := i2ctest.New()
+	sim.EnableSCD4x()
+	sess, err := opener(sim, WithAHT21(0x38, true), WithENS160(0x53))()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sess.CO2() != nil {
+		t.Fatal("CO2 source present although not requested")
+	}
+	if sim.SCDMeasuring() {
+		t.Fatal("SCD4x touched although not requested")
+	}
+	sess, err = opener(sim, WithENS160(0x53))()
+	if err != nil || sess.Climate() != nil || sess.Gas() == nil {
+		t.Fatalf("err=%v", err)
+	}
+}
+
+func TestNewOpenerNoSensors(t *testing.T) {
+	sim := i2ctest.New()
+	if _, err := opener(sim)(); !errors.Is(err, ErrNoSensors) {
+		t.Fatalf("err=%v", err)
+	}
+	if sim.CloseCount() != 0 {
+		t.Fatal("bus opened without sensors")
+	}
+}
+
+func TestNewOpenerSCD4xAbsent(t *testing.T) {
+	sim := i2ctest.New()
+	sess, err := opener(sim, WithAHT21(0x38, true), WithENS160(0x53), WithSCD4x(0x62))()
+	if err == nil || sess != nil {
+		t.Fatalf("sess=%v err=%v", sess, err)
+	}
+	if !strings.Contains(err.Error(), "init scd4x") {
+		t.Fatalf("err=%v", err)
+	}
+	if sim.CloseCount() != 1 {
+		t.Fatalf("close=%d", sim.CloseCount())
+	}
+}
+
+type onlyGas struct{ *fakeSession }
+
+func (onlyGas) Climate() ClimateSource { return nil }
+
+type onlyClimate struct{ *fakeSession }
+
+func (onlyClimate) Gas() GasSource { return nil }
+
+func harnessWith(h *harness, sess Session) {
+	h.sm.open = func() (Session, error) { h.opens++; return sess, nil }
+}
+
+func TestTickGasWithoutClimate(t *testing.T) {
+	h := newHarness(0)
+	harnessWith(h, onlyGas{h.sess})
+	h.tick()
+	r, ok := h.st.Latest()
+	if !ok || r.HasClimate || !r.HasGas || r.TVOCPPB != 10 || h.sess.compCalls != 0 {
+		t.Fatalf("%+v comp=%d", r, h.sess.compCalls)
+	}
+}
+
+func TestTickClimateWithoutGas(t *testing.T) {
+	h := newHarness(1)
+	harnessWith(h, onlyClimate{h.sess})
+	h.tick()
+	r, ok := h.st.Latest()
+	if !ok || !r.HasClimate || r.HasGas || r.TempC != 26 || h.sess.compCalls != 0 {
+		t.Fatalf("%+v comp=%d", r, h.sess.compCalls)
+	}
+}
+
+func TestCO2Only(t *testing.T) {
+	h := newHarness(0)
+	cs := &fakeCO2Session{fakeSession: h.sess, co2: 640}
+	harnessWith(h, co2Only{cs})
+	h.tick()
+	r, ok := h.st.Latest()
+	if !ok || r.HasClimate || r.HasGas || !r.HasCO2 || r.CO2PPM != 640 || !r.Valid() {
+		t.Fatalf("%+v", r)
+	}
+}
+
+type co2Only struct{ *fakeCO2Session }
+
+func (co2Only) Climate() ClimateSource { return nil }
+func (co2Only) Gas() GasSource         { return nil }

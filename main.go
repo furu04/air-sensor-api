@@ -20,6 +20,7 @@ import (
 	"github.com/furu04/air-sensor-api/internal/config"
 	"github.com/furu04/air-sensor-api/internal/i2c"
 	"github.com/furu04/air-sensor-api/internal/sampler"
+	"github.com/furu04/air-sensor-api/internal/scd4x"
 	"github.com/furu04/air-sensor-api/internal/store"
 )
 
@@ -54,6 +55,9 @@ func run(args []string) int {
 		"listen", cfg.ListenAddr,
 		"interval", cfg.Interval,
 		"history", cfg.HistorySize,
+		"aht21", cfg.AHT21Enable,
+		"ens160", cfg.ENS160Enable,
+		"scd4x", cfg.SCD4xEnable,
 	)
 
 	if cfg.ExposedWithoutToken() {
@@ -62,9 +66,23 @@ func run(args []string) int {
 
 	clock := store.NewSystemClock()
 	st := store.New(cfg.HistorySize, clock)
+	var openerOpts []sampler.OpenerOption
+	var apiCfg api.Config
+	if cfg.AHT21Enable {
+		openerOpts = append(openerOpts, sampler.WithAHT21(cfg.AHT21Addr, !cfg.NoCRC))
+		apiCfg.AHT21Addr = cfg.AHT21Addr
+	}
+	if cfg.ENS160Enable {
+		openerOpts = append(openerOpts, sampler.WithENS160(cfg.ENS160Addr))
+		apiCfg.ENS160Addr = cfg.ENS160Addr
+	}
+	if cfg.SCD4xEnable {
+		openerOpts = append(openerOpts, sampler.WithSCD4x(scd4x.DefaultAddr))
+		apiCfg.SCD4xAddr = scd4x.DefaultAddr
+	}
 	open := sampler.NewOpener(
 		func() (i2c.Bus, error) { return i2c.Open(cfg.I2CBus) },
-		cfg.AHT21Addr, cfg.ENS160Addr, !cfg.NoCRC, time.Sleep,
+		time.Sleep, openerOpts...,
 	)
 	sm := sampler.New(open, st, sampler.Config{Interval: cfg.Interval, TempOffset: cfg.TempOffset}, clock, log)
 
@@ -74,15 +92,12 @@ func run(args []string) int {
 		return 1
 	}
 
-	handler := api.New(st, sm, clock, api.Config{
-		Version:    version,
-		SourceURL:  sourceURL,
-		Interval:   cfg.Interval,
-		StaleAfter: cfg.StaleAfter,
-		ENS160Addr: cfg.ENS160Addr,
-		AHT21Addr:  cfg.AHT21Addr,
-		Token:      cfg.APIToken,
-	})
+	apiCfg.Version = version
+	apiCfg.SourceURL = sourceURL
+	apiCfg.Interval = cfg.Interval
+	apiCfg.StaleAfter = cfg.StaleAfter
+	apiCfg.Token = cfg.APIToken
+	handler := api.New(st, sm, clock, apiCfg)
 	srv := &http.Server{
 		Handler:           handler,
 		ReadHeaderTimeout: 5 * time.Second,

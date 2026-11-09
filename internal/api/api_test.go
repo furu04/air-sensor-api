@@ -55,14 +55,16 @@ func newEnv(token string) *env {
 
 func (e *env) add(minutesAgo int, validity int, tvoc int) {
 	e.st.Add(store.Reading{
-		Wall:     epoch.Add(-time.Duration(minutesAgo) * time.Minute),
-		Mono:     e.clk.mono - time.Duration(minutesAgo)*time.Minute,
-		TempC:    24.31,
-		RHPct:    45.2,
-		AQI:      1,
-		TVOCPPB:  tvoc,
-		ECO2PPM:  400,
-		Validity: validity,
+		Wall:       epoch.Add(-time.Duration(minutesAgo) * time.Minute),
+		Mono:       e.clk.mono - time.Duration(minutesAgo)*time.Minute,
+		HasClimate: true,
+		TempC:      24.31,
+		RHPct:      45.2,
+		HasGas:     true,
+		AQI:        1,
+		TVOCPPB:    tvoc,
+		ECO2PPM:    400,
+		Validity:   validity,
 	})
 }
 
@@ -458,5 +460,154 @@ func TestWallClockRewind(t *testing.T) {
 	}
 	if len(beforeWin) != len(afterWin) || len(afterWin) != 2 {
 		t.Fatalf("window: %d vs %d", len(beforeWin), len(afterWin))
+	}
+}
+
+func TestCO2OmittedWhenAbsent(t *testing.T) {
+	e := newEnv("")
+	e.add(0, 0, 1)
+	if body := e.do("GET", "/v1/readings/latest", nil).Body.String(); strings.Contains(body, `"co2_ppm"`) {
+		t.Fatalf("co2_ppm present: %s", body)
+	}
+	if body := e.do("GET", "/v1/readings", nil).Body.String(); strings.Contains(body, `"co2_ppm"`) {
+		t.Fatalf("co2_ppm present: %s", body)
+	}
+}
+
+func TestCO2Present(t *testing.T) {
+	e := newEnv("")
+	for _, ppm := range []int{0, 842} {
+		e.st.Add(store.Reading{
+			Wall: epoch, Mono: e.clk.mono, HasClimate: true, TempC: 24.31, RHPct: 45.2, HasGas: true, AQI: 1, TVOCPPB: 1, ECO2PPM: 400,
+			HasCO2: true, CO2PPM: ppm,
+		})
+		m := decode(t, e.do("GET", "/v1/readings/latest", nil))
+		if m["co2_ppm"] != float64(ppm) || m["eco2_ppm"] != 400.0 {
+			t.Fatalf("ppm=%d: %v", ppm, m)
+		}
+		if len(m) != 12 {
+			t.Fatalf("keys: %v", m)
+		}
+		rec := e.do("GET", "/v1/readings/latest", nil)
+		if !orderOK(rec.Body.String(), []string{"eco2_ppm", "co2_ppm", "validity"}) {
+			t.Fatalf("order: %s", rec.Body)
+		}
+	}
+	rows := readingsOf(t, e.do("GET", "/v1/readings", nil))
+	if len(rows) != 2 || rows[0]["co2_ppm"] != 0.0 || rows[1]["co2_ppm"] != 842.0 {
+		t.Fatalf("%v", rows)
+	}
+}
+
+func TestCO2ValidIndependentOfENS160(t *testing.T) {
+	e := newEnv("")
+	e.st.Add(store.Reading{Wall: epoch, Mono: e.clk.mono, HasGas: true, Validity: 1, HasCO2: true, CO2PPM: 900})
+	m := decode(t, e.do("GET", "/v1/readings/latest", nil))
+	if m["valid"] != false || m["co2_ppm"] != 900.0 {
+		t.Fatalf("%v", m)
+	}
+}
+
+func TestStatusSCD4x(t *testing.T) {
+	e := newEnv("")
+	m := decode(t, e.do("GET", "/v1/status", nil))
+	if _, ok := m["scd4x"]; ok {
+		t.Fatalf("scd4x present while disabled: %v", m)
+	}
+	e.cfg.SCD4xAddr = 0x62
+	m = decode(t, e.do("GET", "/v1/status", nil))
+	scd, ok := m["scd4x"].(map[string]any)
+	if !ok || scd["addr"] != "0x62" {
+		t.Fatalf("%v", m)
+	}
+}
+
+func TestPartialSensorKeys(t *testing.T) {
+	cases := []struct {
+		name    string
+		r       store.Reading
+		present []string
+		absent  []string
+		valid   bool
+	}{
+		{
+			"climate only",
+			store.Reading{HasClimate: true, TempC: 21.5, RHPct: 40},
+			[]string{"temp_c", "rh_pct", "valid"},
+			[]string{"aqi", "tvoc_ppb", "eco2_ppm", "co2_ppm", "validity", "validity_name"},
+			true,
+		},
+		{
+			"gas only warmup",
+			store.Reading{HasGas: true, AQI: 2, TVOCPPB: 5, ECO2PPM: 410, Validity: 1},
+			[]string{"aqi", "tvoc_ppb", "eco2_ppm", "validity", "validity_name", "valid"},
+			[]string{"temp_c", "rh_pct", "co2_ppm"},
+			false,
+		},
+		{
+			"co2 only",
+			store.Reading{HasCO2: true, CO2PPM: 700},
+			[]string{"co2_ppm", "valid"},
+			[]string{"temp_c", "rh_pct", "aqi", "tvoc_ppb", "eco2_ppm", "validity", "validity_name"},
+			true,
+		},
+		{
+			"climate and co2",
+			store.Reading{HasClimate: true, TempC: 0, RHPct: 0, HasCO2: true, CO2PPM: 0},
+			[]string{"temp_c", "rh_pct", "co2_ppm", "valid"},
+			[]string{"aqi", "eco2_ppm", "validity_name"},
+			true,
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			e := newEnv("")
+			c.r.Wall, c.r.Mono = epoch, e.clk.mono
+			e.st.Add(c.r)
+			latest := decode(t, e.do("GET", "/v1/readings/latest", nil))
+			item := readingsOf(t, e.do("GET", "/v1/readings", nil))[0]
+			for name, m := range map[string]map[string]any{"latest": latest, "readings": item} {
+				for _, k := range c.present {
+					if _, ok := m[k]; !ok {
+						t.Errorf("%s: missing %s: %v", name, k, m)
+					}
+				}
+				for _, k := range c.absent {
+					if _, ok := m[k]; ok {
+						t.Errorf("%s: unexpected %s: %v", name, k, m)
+					}
+				}
+				if m["valid"] != c.valid {
+					t.Errorf("%s: valid=%v", name, m["valid"])
+				}
+			}
+		})
+	}
+}
+
+func TestValidOnlyWithoutGasSensor(t *testing.T) {
+	e := newEnv("")
+	for i := 0; i < 3; i++ {
+		e.st.Add(store.Reading{Wall: epoch, Mono: e.clk.mono, HasCO2: true, CO2PPM: 500 + i})
+	}
+	if rows := readingsOf(t, e.do("GET", "/v1/readings?valid_only=true", nil)); len(rows) != 3 {
+		t.Fatalf("rows=%d", len(rows))
+	}
+}
+
+func TestStatusOmitsDisabledSensors(t *testing.T) {
+	e := newEnv("")
+	e.cfg.ENS160Addr = 0
+	e.cfg.AHT21Addr = 0
+	e.cfg.SCD4xAddr = 0x62
+	m := decode(t, e.do("GET", "/v1/status", nil))
+	if _, ok := m["ens160"]; ok {
+		t.Fatalf("ens160 present: %v", m)
+	}
+	if _, ok := m["aht21"]; ok {
+		t.Fatalf("aht21 present: %v", m)
+	}
+	if _, ok := m["scd4x"]; !ok {
+		t.Fatalf("scd4x missing: %v", m)
 	}
 }

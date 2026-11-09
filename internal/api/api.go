@@ -33,6 +33,7 @@ type Config struct {
 	StaleAfter time.Duration
 	ENS160Addr uint8
 	AHT21Addr  uint8
+	SCD4xAddr  uint8
 	Token      string
 }
 
@@ -61,31 +62,29 @@ type errorDetail struct {
 	Message string `json:"message"`
 }
 
+type measurements struct {
+	TempC        *float64 `json:"temp_c,omitempty"`
+	RHPct        *float64 `json:"rh_pct,omitempty"`
+	AQI          *int     `json:"aqi,omitempty"`
+	TVOCPPB      *int     `json:"tvoc_ppb,omitempty"`
+	ECO2PPM      *int     `json:"eco2_ppm,omitempty"`
+	CO2PPM       *int     `json:"co2_ppm,omitempty"`
+	Validity     *int     `json:"validity,omitempty"`
+	ValidityName string   `json:"validity_name,omitempty"`
+	Valid        bool     `json:"valid"`
+}
+
 type latestBody struct {
-	TS           string  `json:"ts"`
-	AgeSeconds   float64 `json:"age_seconds"`
-	Stale        bool    `json:"stale"`
-	TempC        float64 `json:"temp_c"`
-	RHPct        float64 `json:"rh_pct"`
-	AQI          int     `json:"aqi"`
-	TVOCPPB      int     `json:"tvoc_ppb"`
-	ECO2PPM      int     `json:"eco2_ppm"`
-	Validity     int     `json:"validity"`
-	ValidityName string  `json:"validity_name"`
-	Valid        bool    `json:"valid"`
+	TS         string  `json:"ts"`
+	AgeSeconds float64 `json:"age_seconds"`
+	Stale      bool    `json:"stale"`
+	measurements
 }
 
 type readingItem struct {
-	TS           string  `json:"ts"`
-	AgeSeconds   float64 `json:"age_seconds"`
-	TempC        float64 `json:"temp_c"`
-	RHPct        float64 `json:"rh_pct"`
-	AQI          int     `json:"aqi"`
-	TVOCPPB      int     `json:"tvoc_ppb"`
-	ECO2PPM      int     `json:"eco2_ppm"`
-	Validity     int     `json:"validity"`
-	ValidityName string  `json:"validity_name"`
-	Valid        bool    `json:"valid"`
+	TS         string  `json:"ts"`
+	AgeSeconds float64 `json:"age_seconds"`
+	measurements
 }
 
 type readingsBody struct {
@@ -119,6 +118,10 @@ type aht21Body struct {
 	Addr string `json:"addr"`
 }
 
+type scd4xBody struct {
+	Addr string `json:"addr"`
+}
+
 type statusBody struct {
 	Version         string      `json:"version"`
 	Source          string      `json:"source"`
@@ -126,8 +129,9 @@ type statusBody struct {
 	IntervalSeconds int         `json:"interval_seconds"`
 	History         historyBody `json:"history"`
 	Sampler         samplerBody `json:"sampler"`
-	ENS160          ens160Body  `json:"ens160"`
-	AHT21           aht21Body   `json:"aht21"`
+	ENS160          *ens160Body `json:"ens160,omitempty"`
+	AHT21           *aht21Body  `json:"aht21,omitempty"`
+	SCD4x           *scd4xBody  `json:"scd4x,omitempty"`
 }
 
 func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -202,6 +206,24 @@ func ageAt(now time.Duration, r store.Reading) time.Duration {
 
 func round1(x float64) float64 { return math.Round(x*10) / 10 }
 
+func measurementsOf(r store.Reading) measurements {
+	m := measurements{Valid: r.Valid()}
+	if r.HasClimate {
+		t, rh := r.TempC, r.RHPct
+		m.TempC, m.RHPct = &t, &rh
+	}
+	if r.HasGas {
+		aqi, tvoc, eco2, validity := r.AQI, r.TVOCPPB, r.ECO2PPM, r.Validity
+		m.AQI, m.TVOCPPB, m.ECO2PPM, m.Validity = &aqi, &tvoc, &eco2, &validity
+		m.ValidityName = r.ValidityName()
+	}
+	if r.HasCO2 {
+		co2 := r.CO2PPM
+		m.CO2PPM = &co2
+	}
+	return m
+}
+
 func formatTS(r store.Reading) string { return r.Wall.UTC().Format(time.RFC3339) }
 
 func (h *handler) latest(w http.ResponseWriter, r *http.Request) {
@@ -215,14 +237,7 @@ func (h *handler) latest(w http.ResponseWriter, r *http.Request) {
 		TS:           formatTS(rd),
 		AgeSeconds:   round1(age.Seconds()),
 		Stale:        age > h.cfg.StaleAfter,
-		TempC:        rd.TempC,
-		RHPct:        rd.RHPct,
-		AQI:          rd.AQI,
-		TVOCPPB:      rd.TVOCPPB,
-		ECO2PPM:      rd.ECO2PPM,
-		Validity:     rd.Validity,
-		ValidityName: rd.ValidityName(),
-		Valid:        rd.Valid(),
+		measurements: measurementsOf(rd),
 	})
 }
 
@@ -292,14 +307,7 @@ func (h *handler) readings(w http.ResponseWriter, r *http.Request) {
 		items = append(items, readingItem{
 			TS:           formatTS(rd),
 			AgeSeconds:   round1(ageAt(now, rd).Seconds()),
-			TempC:        rd.TempC,
-			RHPct:        rd.RHPct,
-			AQI:          rd.AQI,
-			TVOCPPB:      rd.TVOCPPB,
-			ECO2PPM:      rd.ECO2PPM,
-			Validity:     rd.Validity,
-			ValidityName: rd.ValidityName(),
-			Valid:        rd.Valid(),
+			measurements: measurementsOf(rd),
 		})
 	}
 	h.writeJSON(w, r, http.StatusOK, readingsBody{
@@ -329,12 +337,24 @@ func (h *handler) status(w http.ResponseWriter, r *http.Request) {
 		sb.LastError = snap.LastError
 	}
 
-	eb := ens160Body{Addr: fmt.Sprintf("0x%02X", h.cfg.ENS160Addr)}
-	if snap.Initialized {
-		eb.PartID = ens160PartIDDisplay
+	var eb *ens160Body
+	if h.cfg.ENS160Addr != 0 {
+		eb = &ens160Body{Addr: fmt.Sprintf("0x%02X", h.cfg.ENS160Addr)}
+		if snap.Initialized {
+			eb.PartID = ens160PartIDDisplay
+		}
+		if rd, ok := h.st.Latest(); ok && rd.HasGas {
+			eb.ValidityName = rd.ValidityName()
+		}
 	}
-	if rd, ok := h.st.Latest(); ok {
-		eb.ValidityName = rd.ValidityName()
+	var ab *aht21Body
+	if h.cfg.AHT21Addr != 0 {
+		ab = &aht21Body{Addr: fmt.Sprintf("0x%02X", h.cfg.AHT21Addr)}
+	}
+
+	var scd *scd4xBody
+	if h.cfg.SCD4xAddr != 0 {
+		scd = &scd4xBody{Addr: fmt.Sprintf("0x%02X", h.cfg.SCD4xAddr)}
 	}
 
 	h.writeJSON(w, r, http.StatusOK, statusBody{
@@ -345,7 +365,8 @@ func (h *handler) status(w http.ResponseWriter, r *http.Request) {
 		History:         historyBody{Size: h.st.Capacity(), Count: h.st.Len()},
 		Sampler:         sb,
 		ENS160:          eb,
-		AHT21:           aht21Body{Addr: fmt.Sprintf("0x%02X", h.cfg.AHT21Addr)},
+		AHT21:           ab,
+		SCD4x:           scd,
 	})
 }
 

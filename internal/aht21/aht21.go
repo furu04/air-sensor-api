@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/furu04/air-sensor-api/internal/crc8"
 	"github.com/furu04/air-sensor-api/internal/i2c"
 )
 
@@ -106,17 +107,4 @@ func (s *Sensor) Measure() (tempC, rhPct float64, err error) {
 	return tempC, rhPct, nil
 }
 
-func CRC8(data []byte) byte {
-	crc := byte(0xFF)
-	for _, b := range data {
-		crc ^= b
-		for i := 0; i < 8; i++ {
-			if crc&0x80 != 0 {
-				crc = crc<<1 ^ 0x31
-			} else {
-				crc <<= 1
-			}
-		}
-	}
-	return crc
-}
+func CRC8(data []byte) byte { return crc8.Sum(data) }

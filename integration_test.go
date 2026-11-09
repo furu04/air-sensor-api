@@ -24,7 +24,7 @@ func TestIntegration(t *testing.T) {
 
 	clock := store.NewSystemClock()
 	st := store.New(100, clock)
-	open := sampler.NewOpener(func() (i2c.Bus, error) { return sim, nil }, 0x38, 0x53, true, func(time.Duration) {})
+	open := sampler.NewOpener(func() (i2c.Bus, error) { return sim, nil }, func(time.Duration) {}, sampler.WithAHT21(0x38, true), sampler.WithENS160(0x53))
 	sm := sampler.New(open, st, sampler.Config{Interval: 10 * time.Second}, clock, nil)
 	h := api.New(st, sm, clock, api.Config{
 		Version:    "test",
@@ -86,10 +86,82 @@ func TestIntegration(t *testing.T) {
 	}
 }
 
+func TestIntegrationSCD4x(t *testing.T) {
+	sim := i2ctest.New()
+	sim.EnableSCD4x()
+	sim.SetGas(3, 300, 400, 0)
+	sim.SetCO2(950)
+	sim.SetSCDNotReady(2)
+
+	clock := store.NewSystemClock()
+	st := store.New(100, clock)
+	open := sampler.NewOpener(func() (i2c.Bus, error) { return sim, nil }, func(time.Duration) {}, sampler.WithAHT21(0x38, true), sampler.WithENS160(0x53), sampler.WithSCD4x(0x62))
+	sm := sampler.New(open, st, sampler.Config{Interval: 10 * time.Second}, clock, nil)
+	h := api.New(st, sm, clock, api.Config{
+		Interval:   10 * time.Second,
+		StaleAfter: time.Hour,
+		ENS160Addr: 0x53,
+		AHT21Addr:  0x38,
+		SCD4xAddr:  0x62,
+	})
+	get := func(path string) map[string]any {
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, path, nil))
+		if rec.Code != 200 {
+			t.Fatalf("%s: %d %s", path, rec.Code, rec.Body)
+		}
+		var m map[string]any
+		if err := json.Unmarshal(rec.Body.Bytes(), &m); err != nil {
+			t.Fatal(err)
+		}
+		return m
+	}
+
+	sm.Tick()
+	m := get("/v1/readings/latest")
+	if m["co2_ppm"] != 950.0 || m["eco2_ppm"] != 400.0 || m["valid"] != true {
+		t.Fatalf("%v", m)
+	}
+	if scd, _ := get("/v1/status")["scd4x"].(map[string]any); scd["addr"] != "0x62" {
+		t.Fatalf("status scd4x: %v", scd)
+	}
+
+	sim.SetUnplugged(true)
+	for i := 0; i < 5; i++ {
+		sm.Tick()
+	}
+	sim.SetUnplugged(false)
+	sim.SetSCDMeasuring(true)
+	sim.SetCO2(1100)
+	sm.Tick()
+	m = get("/v1/readings/latest")
+	if m["co2_ppm"] != 1100.0 {
+		t.Fatalf("after replug: %v", m)
+	}
+}
+
+func TestIntegrationSCD4xDisabledLeavesSensorAlone(t *testing.T) {
+	sim := i2ctest.New()
+	sim.EnableSCD4x()
+	clock := store.NewSystemClock()
+	st := store.New(10, clock)
+	open := sampler.NewOpener(func() (i2c.Bus, error) { return sim, nil }, func(time.Duration) {}, sampler.WithAHT21(0x38, true), sampler.WithENS160(0x53))
+	sm := sampler.New(open, st, sampler.Config{Interval: 10 * time.Second}, clock, nil)
+	sm.Tick()
+	if rd, ok := st.Latest(); !ok || rd.HasCO2 {
+		t.Fatalf("%+v %v", rd, ok)
+	}
+	for _, w := range sim.Writes() {
+		if w.Addr == 0x62 {
+			t.Fatalf("unexpected SCD4x access: %+v", w)
+		}
+	}
+}
+
 func TestNoSensorStaysUp(t *testing.T) {
 	clock := store.NewSystemClock()
 	st := store.New(10, clock)
-	open := sampler.NewOpener(func() (i2c.Bus, error) { return i2c.Open(250) }, 0x38, 0x53, true, func(time.Duration) {})
+	open := sampler.NewOpener(func() (i2c.Bus, error) { return i2c.Open(250) }, func(time.Duration) {}, sampler.WithAHT21(0x38, true), sampler.WithENS160(0x53))
 	sm := sampler.New(open, st, sampler.Config{Interval: 10 * time.Second}, clock, nil)
 	h := api.New(st, sm, clock, api.Config{Interval: 10 * time.Second, StaleAfter: time.Hour, ENS160Addr: 0x53, AHT21Addr: 0x38})
 
@@ -130,5 +202,94 @@ func TestRunArgs(t *testing.T) {
 	}
 	if got := run([]string{"--version", "extra"}); got != 2 {
 		t.Fatalf("extra arg: %d", got)
+	}
+}
+
+func newStack(t *testing.T, sim *i2ctest.Sim, cfg api.Config, opts ...sampler.OpenerOption) (*sampler.Sampler, func(string) map[string]any) {
+	t.Helper()
+	clock := store.NewSystemClock()
+	st := store.New(100, clock)
+	open := sampler.NewOpener(func() (i2c.Bus, error) { return sim, nil }, func(time.Duration) {}, opts...)
+	sm := sampler.New(open, st, sampler.Config{Interval: 10 * time.Second}, clock, nil)
+	cfg.Interval, cfg.StaleAfter = 10*time.Second, time.Hour
+	h := api.New(st, sm, clock, cfg)
+	return sm, func(path string) map[string]any {
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, path, nil))
+		if rec.Code != 200 {
+			t.Fatalf("%s: %d %s", path, rec.Code, rec.Body)
+		}
+		var m map[string]any
+		if err := json.Unmarshal(rec.Body.Bytes(), &m); err != nil {
+			t.Fatal(err)
+		}
+		return m
+	}
+}
+
+func TestIntegrationSCD4xOnly(t *testing.T) {
+	sim := i2ctest.New()
+	sim.EnableSCD4x()
+	sim.SetCO2(780)
+	sm, get := newStack(t, sim, api.Config{SCD4xAddr: 0x62}, sampler.WithSCD4x(0x62))
+	sm.Tick()
+	m := get("/v1/readings/latest")
+	if m["co2_ppm"] != 780.0 || m["valid"] != true {
+		t.Fatalf("%v", m)
+	}
+	for _, k := range []string{"temp_c", "rh_pct", "aqi", "tvoc_ppb", "eco2_ppm", "validity", "validity_name"} {
+		if _, ok := m[k]; ok {
+			t.Errorf("unexpected key %s", k)
+		}
+	}
+	st := get("/v1/status")
+	if _, ok := st["ens160"]; ok {
+		t.Errorf("ens160 in status: %v", st)
+	}
+	if _, ok := st["aht21"]; ok {
+		t.Errorf("aht21 in status: %v", st)
+	}
+	for _, w := range sim.Writes() {
+		if w.Addr == 0x38 || w.Addr == 0x53 {
+			t.Fatalf("touched disabled sensor: %+v", w)
+		}
+	}
+	for _, r := range sim.Reads() {
+		if r.Addr == 0x38 || r.Addr == 0x53 {
+			t.Fatalf("touched disabled sensor: %+v", r)
+		}
+	}
+}
+
+func TestIntegrationENS160WithoutAHT21(t *testing.T) {
+	sim := i2ctest.New()
+	sim.SetGas(2, 40, 420, 0)
+	sm, get := newStack(t, sim, api.Config{ENS160Addr: 0x53}, sampler.WithENS160(0x53))
+	sm.Tick()
+	m := get("/v1/readings/latest")
+	if m["aqi"] != 2.0 || m["tvoc_ppb"] != 40.0 || m["valid"] != true {
+		t.Fatalf("%v", m)
+	}
+	if _, ok := m["temp_c"]; ok {
+		t.Errorf("temp_c present without AHT21: %v", m)
+	}
+	if tin, rhin := sim.Compensation(); tin != 0 || rhin != 0 {
+		t.Fatalf("compensation written without a climate source: %d %d", tin, rhin)
+	}
+}
+
+func TestIntegrationAHT21WithSCD4x(t *testing.T) {
+	sim := i2ctest.New()
+	sim.EnableSCD4x()
+	sim.SetClimate(23, 45)
+	sim.SetCO2(900)
+	sm, get := newStack(t, sim, api.Config{AHT21Addr: 0x38, SCD4xAddr: 0x62}, sampler.WithAHT21(0x38, true), sampler.WithSCD4x(0x62))
+	sm.Tick()
+	m := get("/v1/readings/latest")
+	if m["temp_c"] != 23.0 || m["co2_ppm"] != 900.0 {
+		t.Fatalf("%v", m)
+	}
+	if _, ok := m["aqi"]; ok {
+		t.Errorf("aqi present without ENS160: %v", m)
 	}
 }

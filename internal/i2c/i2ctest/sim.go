@@ -8,11 +8,22 @@ import (
 	"fmt"
 	"sync"
 	"syscall"
+
+	"github.com/furu04/air-sensor-api/internal/crc8"
 )
 
 const (
 	ahtAddr = 0x38
 	ensAddr = 0x53
+	scdAddr = 0x62
+)
+
+const (
+	scdCmdStop   = 0x3F86
+	scdCmdSerial = 0x3682
+	scdCmdStart  = 0x21B1
+	scdCmdReady  = 0xE4B8
+	scdCmdRead   = 0xEC05
 )
 
 type WriteCall struct {
@@ -49,6 +60,13 @@ type Sim struct {
 	validity    int
 	statusError bool
 
+	scdPresent   bool
+	scdMeasuring bool
+	scdPending   uint16
+	scdNotReady  int
+	scdCO2       int
+	scdBadCRC    bool
+
 	writes    []WriteCall
 	reads     []ReadCall
 	closeCall int
@@ -62,6 +80,7 @@ func New() *Sim {
 	}
 	s.SetClimate(25.0, 50.0)
 	s.SetGas(1, 0, 400, 0)
+	s.scdCO2 = 800
 	return s
 }
 
@@ -120,6 +139,40 @@ func (s *Sim) SetStatusError(v bool) {
 	s.statusError = v
 }
 
+func (s *Sim) EnableSCD4x() {
+	defer s.lock()()
+	s.scdPresent = true
+}
+
+func (s *Sim) SetCO2(ppm int) {
+	defer s.lock()()
+	s.scdCO2 = ppm
+}
+
+func (s *Sim) SetSCDNotReady(polls int) {
+	defer s.lock()()
+	s.scdNotReady = polls
+}
+
+func (s *Sim) SetSCDBadCRC(v bool) {
+	defer s.lock()()
+	s.scdBadCRC = v
+}
+
+func (s *Sim) SetSCDMeasuring(v bool) {
+	defer s.lock()()
+	s.scdMeasuring = v
+}
+
+func (s *Sim) SCDMeasuring() bool {
+	defer s.lock()()
+	return s.scdMeasuring
+}
+
+func (s *Sim) known(addr uint8) bool {
+	return addr == ahtAddr || addr == ensAddr || (addr == scdAddr && s.scdPresent)
+}
+
 func (s *Sim) Writes() []WriteCall {
 	defer s.lock()()
 	out := make([]WriteCall, len(s.writes))
@@ -171,11 +224,13 @@ func (s *Sim) Write(addr uint8, data []byte) error {
 	if len(data) < 1 {
 		return errors.New("i2ctest: empty write")
 	}
-	if addr != ahtAddr && addr != ensAddr {
+	if !s.known(addr) {
 		return s.nack()
 	}
 	s.writes = append(s.writes, WriteCall{Addr: addr, Data: append([]byte(nil), data...)})
 	switch addr {
+	case scdAddr:
+		return s.scdWrite(data)
 	case ahtAddr:
 		if len(data) == 3 && data[0] == 0xBE && data[1] == 0x08 && data[2] == 0x00 && s.ahtInitWorks {
 			s.ahtCalibrated = true
@@ -201,6 +256,10 @@ func (s *Sim) Read(addr uint8, n int) ([]byte, error) {
 	if n < 1 {
 		return nil, errors.New("i2ctest: invalid read length")
 	}
+	if addr == scdAddr && s.scdPresent {
+		s.reads = append(s.reads, ReadCall{Addr: addr, N: n})
+		return s.scdRead(n)
+	}
 	if addr != ahtAddr {
 		return nil, s.nack()
 	}
@@ -217,7 +276,7 @@ func (s *Sim) Read(addr uint8, n int) ([]byte, error) {
 	frame[3] = byte(s.rawH&0x0F)<<4 | byte(s.rawT>>16)
 	frame[4] = byte(s.rawT >> 8)
 	frame[5] = byte(s.rawT)
-	frame[6] = crc8(frame[:6])
+	frame[6] = crc8.Sum(frame[:6])
 	if n > len(frame) {
 		n = len(frame)
 	}
@@ -232,11 +291,13 @@ func (s *Sim) WriteRead(addr uint8, w []byte, n int) ([]byte, error) {
 	if len(w) < 1 || n < 1 {
 		return nil, errors.New("i2ctest: invalid write-read arguments")
 	}
-	if addr != ahtAddr && addr != ensAddr {
+	if !s.known(addr) {
 		return nil, s.nack()
 	}
 	s.reads = append(s.reads, ReadCall{Addr: addr, W: append([]byte(nil), w...), N: n})
 	switch addr {
+	case scdAddr:
+		return nil, errors.New("i2ctest: scd4x does not support repeated start")
 	case ahtAddr:
 		if w[0] != 0x71 {
 			return nil, errors.New("i2ctest: unsupported aht21 register")
@@ -269,6 +330,74 @@ func (s *Sim) WriteRead(addr uint8, w []byte, n int) ([]byte, error) {
 	}
 }
 
+func (s *Sim) scdWrite(data []byte) error {
+	if len(data) != 2 {
+		return errors.New("i2ctest: scd4x command must be 2 bytes")
+	}
+	cmd := uint16(data[0])<<8 | uint16(data[1])
+	switch cmd {
+	case scdCmdStop:
+		s.scdMeasuring = false
+		s.scdPending = 0
+	case scdCmdStart:
+		if s.scdMeasuring {
+			return s.nack()
+		}
+		s.scdMeasuring = true
+		s.scdPending = 0
+	case scdCmdSerial:
+		if s.scdMeasuring {
+			return s.nack()
+		}
+		s.scdPending = cmd
+	case scdCmdReady, scdCmdRead:
+		if !s.scdMeasuring {
+			return s.nack()
+		}
+		s.scdPending = cmd
+	default:
+		return s.nack()
+	}
+	return nil
+}
+
+func (s *Sim) scdRead(n int) ([]byte, error) {
+	cmd := s.scdPending
+	s.scdPending = 0
+	var words []uint16
+	switch cmd {
+	case scdCmdSerial:
+		words = []uint16{0x1234, 0x5678, 0x9ABC}
+	case scdCmdReady:
+		if s.scdNotReady > 0 {
+			s.scdNotReady--
+			words = []uint16{0x8000}
+		} else {
+			words = []uint16{0x8006}
+		}
+	case scdCmdRead:
+		if s.scdNotReady > 0 {
+			return nil, s.nack()
+		}
+		words = []uint16{uint16(s.scdCO2), 0x6667, 0x8000}
+	default:
+		return nil, s.nack()
+	}
+	frame := make([]byte, 0, len(words)*3)
+	for _, w := range words {
+		b := []byte{byte(w >> 8), byte(w)}
+		c := crc8.Sum(b)
+		if s.scdBadCRC {
+			c ^= 0xFF
+		}
+		frame = append(frame, b[0], b[1], c)
+	}
+	if n > len(frame) {
+		n = len(frame)
+	}
+	return frame[:n], nil
+}
+
 func (s *Sim) Close() error {
 	defer s.lock()()
 	s.closeCall++
@@ -279,19 +408,4 @@ func pad(b []byte, n int) []byte {
 	out := make([]byte, n)
 	copy(out, b)
 	return out
-}
-
-func crc8(data []byte) byte {
-	crc := byte(0xFF)
-	for _, b := range data {
-		crc ^= b
-		for i := 0; i < 8; i++ {
-			if crc&0x80 != 0 {
-				crc = crc<<1 ^ 0x31
-			} else {
-				crc <<= 1
-			}
-		}
-	}
-	return crc
 }

@@ -5,6 +5,7 @@ package sampler
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -15,6 +16,7 @@ import (
 	"github.com/furu04/air-sensor-api/internal/aht21"
 	"github.com/furu04/air-sensor-api/internal/ens160"
 	"github.com/furu04/air-sensor-api/internal/i2c"
+	"github.com/furu04/air-sensor-api/internal/scd4x"
 	"github.com/furu04/air-sensor-api/internal/store"
 )
 
@@ -23,43 +25,112 @@ const (
 	maxErrorLen = 200
 )
 
-type Session interface {
+type ClimateSource interface {
 	Measure() (tempC, rhPct float64, err error)
+}
+
+type GasSource interface {
 	Compensate(tempC, rhPct float64) error
 	ReadGas() (ens160.Data, error)
+}
+
+type CO2Source interface {
+	ReadCO2() (ppm int, err error)
+}
+
+type Session interface {
+	Climate() ClimateSource
+	Gas() GasSource
+	CO2() CO2Source
 	Close() error
 }
 
 type OpenFunc func() (Session, error)
 
+type ensSource struct{ s *ens160.Sensor }
+
+func (e ensSource) Compensate(t, rh float64) error { return e.s.Compensate(t, rh) }
+func (e ensSource) ReadGas() (ens160.Data, error)  { return e.s.Read() }
+
 type session struct {
-	bus i2c.Bus
-	aht *aht21.Sensor
-	ens *ens160.Sensor
+	bus     i2c.Bus
+	climate ClimateSource
+	gas     GasSource
+	co2     CO2Source
 }
 
-func (s *session) Measure() (float64, float64, error) { return s.aht.Measure() }
-func (s *session) Compensate(t, rh float64) error     { return s.ens.Compensate(t, rh) }
-func (s *session) ReadGas() (ens160.Data, error)      { return s.ens.Read() }
-func (s *session) Close() error                       { return s.bus.Close() }
+func (s *session) Climate() ClimateSource { return s.climate }
+func (s *session) Gas() GasSource         { return s.gas }
+func (s *session) CO2() CO2Source         { return s.co2 }
+func (s *session) Close() error           { return s.bus.Close() }
 
-func NewOpener(open func() (i2c.Bus, error), ahtAddr, ensAddr uint8, checkCRC bool, sleep func(time.Duration)) OpenFunc {
+type openerOptions struct {
+	aht21     bool
+	ahtAddr   uint8
+	checkCRC  bool
+	ens160    bool
+	ensAddr   uint8
+	scd4x     bool
+	scd4xAddr uint8
+}
+
+type OpenerOption func(*openerOptions)
+
+func WithAHT21(addr uint8, checkCRC bool) OpenerOption {
+	return func(o *openerOptions) {
+		o.aht21, o.ahtAddr, o.checkCRC = true, addr, checkCRC
+	}
+}
+
+func WithENS160(addr uint8) OpenerOption {
+	return func(o *openerOptions) { o.ens160, o.ensAddr = true, addr }
+}
+
+func WithSCD4x(addr uint8) OpenerOption {
+	return func(o *openerOptions) { o.scd4x, o.scd4xAddr = true, addr }
+}
+
+var ErrNoSensors = errors.New("no sensors configured")
+
+func NewOpener(open func() (i2c.Bus, error), sleep func(time.Duration), opts ...OpenerOption) OpenFunc {
+	var o openerOptions
+	for _, opt := range opts {
+		opt(&o)
+	}
 	return func() (Session, error) {
+		if !o.aht21 && !o.ens160 && !o.scd4x {
+			return nil, ErrNoSensors
+		}
 		bus, err := open()
 		if err != nil {
 			return nil, fmt.Errorf("open bus: %w", err)
 		}
-		aht := aht21.New(bus, ahtAddr, checkCRC, sleep)
-		if err := aht.Init(); err != nil {
-			bus.Close()
-			return nil, fmt.Errorf("init aht21: %w", err)
+		sess := &session{bus: bus}
+		if o.aht21 {
+			aht := aht21.New(bus, o.ahtAddr, o.checkCRC, sleep)
+			if err := aht.Init(); err != nil {
+				bus.Close()
+				return nil, fmt.Errorf("init aht21: %w", err)
+			}
+			sess.climate = aht
 		}
-		ens := ens160.New(bus, ensAddr)
-		if err := ens.Init(); err != nil {
-			bus.Close()
-			return nil, fmt.Errorf("init ens160: %w", err)
+		if o.ens160 {
+			ens := ens160.New(bus, o.ensAddr)
+			if err := ens.Init(); err != nil {
+				bus.Close()
+				return nil, fmt.Errorf("init ens160: %w", err)
+			}
+			sess.gas = ensSource{ens}
 		}
-		return &session{bus: bus, aht: aht, ens: ens}, nil
+		if o.scd4x {
+			scd := scd4x.New(bus, o.scd4xAddr, sleep)
+			if err := scd.Init(); err != nil {
+				bus.Close()
+				return nil, fmt.Errorf("init scd4x: %w", err)
+			}
+			sess.co2 = scd
+		}
+		return sess, nil
 	}
 }
 
@@ -143,34 +214,55 @@ func (s *Sampler) Tick() {
 		s.log.Info("sensor init ok")
 	}
 
-	t, rh, err := sess.Measure()
-	if err != nil {
-		s.failSample(err)
-		return
+	var rd store.Reading
+	var t, rh float64
+	climate := sess.Climate()
+	if climate != nil {
+		var err error
+		t, rh, err = climate.Measure()
+		if err != nil {
+			s.failSample(err)
+			return
+		}
+		t += s.cfg.TempOffset
+		rh = math.Min(math.Max(rh, 0), 100)
+		rd.HasClimate = true
+		rd.TempC = round(t, 2)
+		rd.RHPct = round(rh, 1)
 	}
-	t += s.cfg.TempOffset
-	rh = math.Min(math.Max(rh, 0), 100)
 
-	if err := sess.Compensate(t, rh); err != nil {
-		s.failSample(err)
-		return
-	}
-	d, err := sess.ReadGas()
-	if err != nil {
-		s.failSample(err)
-		return
+	if gas := sess.Gas(); gas != nil {
+		if climate != nil {
+			if err := gas.Compensate(t, rh); err != nil {
+				s.failSample(err)
+				return
+			}
+		}
+		d, err := gas.ReadGas()
+		if err != nil {
+			s.failSample(err)
+			return
+		}
+		rd.HasGas = true
+		rd.AQI = d.AQI
+		rd.TVOCPPB = d.TVOCPPB
+		rd.ECO2PPM = d.ECO2PPM
+		rd.Validity = d.Validity
 	}
 
-	s.store.Add(store.Reading{
-		Wall:     s.clock.Now(),
-		Mono:     s.clock.Mono(),
-		TempC:    round(t, 2),
-		RHPct:    round(rh, 1),
-		AQI:      d.AQI,
-		TVOCPPB:  d.TVOCPPB,
-		ECO2PPM:  d.ECO2PPM,
-		Validity: d.Validity,
-	})
+	if co2 := sess.CO2(); co2 != nil {
+		ppm, err := co2.ReadCO2()
+		if err != nil {
+			s.failSample(err)
+			return
+		}
+		rd.HasCO2 = true
+		rd.CO2PPM = ppm
+	}
+
+	rd.Wall = s.clock.Now()
+	rd.Mono = s.clock.Mono()
+	s.store.Add(rd)
 	s.success()
 }
 

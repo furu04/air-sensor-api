@@ -26,17 +26,21 @@ func (c *systemClock) Now() time.Time { return time.Now() }
 func (c *systemClock) Mono() time.Duration { return time.Since(c.start) }
 
 type Reading struct {
-	Wall     time.Time
-	Mono     time.Duration
-	TempC    float64
-	RHPct    float64
-	AQI      int
-	TVOCPPB  int
-	ECO2PPM  int
-	Validity int
+	Wall       time.Time
+	Mono       time.Duration
+	HasClimate bool
+	TempC      float64
+	RHPct      float64
+	HasGas     bool
+	AQI        int
+	TVOCPPB    int
+	ECO2PPM    int
+	HasCO2     bool
+	CO2PPM     int
+	Validity   int
 }
 
-func (r Reading) Valid() bool { return r.Validity == 0 }
+func (r Reading) Valid() bool { return !r.HasGas || r.Validity == 0 }
 
 func (r Reading) ValidityName() string {
 	switch r.Validity {
