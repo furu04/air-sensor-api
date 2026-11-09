@@ -304,7 +304,7 @@ func TestIntegrationSCD4xClimateWithTempOffset(t *testing.T) {
 	sm := sampler.New(open, st, sampler.Config{Interval: 10 * time.Second, TempOffset: -3}, clock, nil)
 	sm.Tick()
 	rd, ok := st.Latest()
-	if !ok || rd.TempC != 24 || rd.RHPct != 38 || !rd.HasClimate {
+	if !ok || rd.TempC != 24 || rd.RHPct != 45.4 || !rd.HasClimate {
 		t.Fatalf("%+v %v", rd, ok)
 	}
 }

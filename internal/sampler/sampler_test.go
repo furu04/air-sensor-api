@@ -109,11 +109,11 @@ func TestNormalTick(t *testing.T) {
 	h := newHarness(-2)
 	h.sess.temp, h.sess.rh = 27, 40
 	h.tick()
-	if h.sess.compTemp != 25 || h.sess.compRH != 40 {
+	if h.sess.compTemp != 25 || math.Abs(h.sess.compRH-45.023) > 0.01 {
 		t.Fatalf("comp=%v,%v", h.sess.compTemp, h.sess.compRH)
 	}
 	r, ok := h.st.Latest()
-	if !ok || h.st.Len() != 1 || r.TempC != 25 || r.RHPct != 40 {
+	if !ok || h.st.Len() != 1 || r.TempC != 25 || r.RHPct != 45 {
 		t.Fatalf("%+v", r)
 	}
 }
@@ -593,7 +593,7 @@ func TestSCD4xSuppliesClimateWhenAHT21Disabled(t *testing.T) {
 	if !ok || !r.HasClimate || !r.HasCO2 || r.CO2PPM != 910 {
 		t.Fatalf("%+v", r)
 	}
-	if r.TempC != 22.5 || r.RHPct != 41 {
+	if r.TempC != 22.5 || r.RHPct != 44.9 {
 		t.Fatalf("temp=%v rh=%v", r.TempC, r.RHPct)
 	}
 }
@@ -670,5 +670,44 @@ func TestSCD4xMeasureFailure(t *testing.T) {
 	h.tick()
 	if h.st.Len() != 1 || h.sm.Snapshot().ConsecutiveFailures != 1 {
 		t.Fatalf("len=%d snap=%+v", h.st.Len(), h.sm.Snapshot())
+	}
+}
+
+func TestHumidityRescaledByTempOffset(t *testing.T) {
+	tests := []struct {
+		name         string
+		offset       float64
+		temp, rh     float64
+		wantT, wantH float64
+	}{
+		{"cooling raises rh", -5, 28.31, 34, 23.31, 45.7},
+		{"warming lowers rh", 10, 20, 30, 30, 16.5},
+		{"clamped at 100", -10, 25, 90, 15, 100},
+		{"zero offset leaves rh untouched", 0, 28.31, 34, 28.31, 34},
+		{"zero rh stays zero", -5, 28, 0, 23, 0},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			h := newHarness(tt.offset)
+			h.sess.temp, h.sess.rh = tt.temp, tt.rh
+			h.tick()
+			r, ok := h.st.Latest()
+			if !ok || r.TempC != tt.wantT || r.RHPct != tt.wantH {
+				t.Fatalf("temp=%v rh=%v want %v/%v", r.TempC, r.RHPct, tt.wantT, tt.wantH)
+			}
+			if tt.wantH != 100 && math.Abs(h.sess.compRH-tt.wantH) > 0.05 {
+				t.Fatalf("compensation rh=%v want ~%v", h.sess.compRH, tt.wantH)
+			}
+		})
+	}
+}
+
+func TestHumidityClampedBeforeRescale(t *testing.T) {
+	h := newHarness(-5)
+	h.sess.temp, h.sess.rh = 25, 100.4
+	h.tick()
+	r, _ := h.st.Latest()
+	if r.RHPct != 100 {
+		t.Fatalf("rh=%v", r.RHPct)
 	}
 }

@@ -16,6 +16,7 @@ import (
 	"github.com/furu04/air-sensor-api/internal/aht21"
 	"github.com/furu04/air-sensor-api/internal/ens160"
 	"github.com/furu04/air-sensor-api/internal/i2c"
+	"github.com/furu04/air-sensor-api/internal/psychro"
 	"github.com/furu04/air-sensor-api/internal/scd4x"
 	"github.com/furu04/air-sensor-api/internal/store"
 )
@@ -250,14 +251,13 @@ func (s *Sampler) Tick() {
 	var t, rh float64
 	climate := sess.Climate()
 	if climate != nil {
-		var err error
-		t, rh, err = climate.Measure()
+		rawT, rawRH, err := climate.Measure()
 		if err != nil {
 			s.failSample(err)
 			return
 		}
-		t += s.cfg.TempOffset
-		rh = math.Min(math.Max(rh, 0), 100)
+		t = rawT + s.cfg.TempOffset
+		rh = clampRH(psychro.RescaleRH(clampRH(rawRH), rawT, t))
 		rd.HasClimate = true
 		rd.TempC = round(t, 2)
 		rd.RHPct = round(rh, 1)
@@ -366,6 +366,8 @@ func (s *Sampler) Run(ctx context.Context) {
 		}
 	}
 }
+
+func clampRH(rh float64) float64 { return math.Min(math.Max(rh, 0), 100) }
 
 func round(x float64, digits int) float64 {
 	p := math.Pow(10, float64(digits))
