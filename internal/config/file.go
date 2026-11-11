@@ -57,6 +57,7 @@ type fileConfig struct {
 	HistorySize *int         `json:"history_size"`
 	StaleAfter  *string      `json:"stale_after"`
 	NoCRC       *bool        `json:"no_crc"`
+	RecordFile  *string      `json:"record_file"`
 	Sensors     *sensorsFile `json:"sensors"`
 }
 
@@ -88,6 +89,7 @@ func parseFile(data []byte) (map[string]string, error) {
 	str("LISTEN_ADDR", fc.ListenAddr)
 	str("INTERVAL", fc.Interval)
 	str("STALE_AFTER", fc.StaleAfter)
+	str("RECORD_FILE", fc.RecordFile)
 	flag("NO_CRC", fc.NoCRC)
 	integer := func(key string, v *int) {
 		if v != nil {

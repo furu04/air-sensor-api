@@ -8,12 +8,14 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"testing"
 	"time"
 
 	"github.com/furu04/air-sensor-api/internal/api"
 	"github.com/furu04/air-sensor-api/internal/i2c"
 	"github.com/furu04/air-sensor-api/internal/i2c/i2ctest"
+	"github.com/furu04/air-sensor-api/internal/recorder"
 	"github.com/furu04/air-sensor-api/internal/sampler"
 	"github.com/furu04/air-sensor-api/internal/store"
 )
@@ -352,5 +354,64 @@ func TestIntegrationSplitBuses(t *testing.T) {
 		if w.Addr == 0x38 || w.Addr == 0x53 {
 			t.Fatalf("AHT21/ENS160 touched on the wrong bus: %+v", w)
 		}
+	}
+}
+
+func TestIntegrationRecordsEndpoint(t *testing.T) {
+	sim := i2ctest.New()
+	sim.SetClimate(23, 45)
+	sim.SetGas(2, 80, 500, 0)
+	rec, err := recorder.New(filepath.Join(t.TempDir(), "readings.jsonl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	clock := store.NewSystemClock()
+	st := store.New(100, clock)
+	open := sampler.NewOpener(func(int) (i2c.Bus, error) { return sim, nil }, func(time.Duration) {},
+		sampler.WithAHT21(1, 0x38, true), sampler.WithENS160(1, 0x53))
+	sm := sampler.New(open, st, sampler.Config{Interval: 10 * time.Second, Recorder: rec}, clock, nil)
+	h := api.New(st, sm, clock, api.Config{Interval: 10 * time.Second, StaleAfter: time.Hour, AHT21Addr: 0x38, ENS160Addr: 0x53, Records: rec})
+	get := func(path string) map[string]any {
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, httptest.NewRequest(http.MethodGet, path, nil))
+		if w.Code != 200 {
+			t.Fatalf("%s: %d %s", path, w.Code, w.Body)
+		}
+		var m map[string]any
+		if err := json.Unmarshal(w.Body.Bytes(), &m); err != nil {
+			t.Fatal(err)
+		}
+		return m
+	}
+	sm.Tick()
+	sm.Tick()
+	latest := get("/v1/readings/latest")
+	body := get("/v1/records")
+	if body["count"] != 2.0 || body["truncated"] != false {
+		t.Fatalf("%v", body)
+	}
+	last := body["records"].([]any)[1].(map[string]any)
+	for _, k := range []string{"ts", "temp_c", "rh_pct", "aqi", "tvoc_ppb", "eco2_ppm", "validity", "validity_name", "valid"} {
+		if last[k] != latest[k] {
+			t.Errorf("%s: record %v != latest %v", k, last[k], latest[k])
+		}
+	}
+	if _, ok := last["age_seconds"]; ok {
+		t.Errorf("age_seconds must not be recorded: %v", last)
+	}
+	if _, ok := last["co2_ppm"]; ok {
+		t.Errorf("co2_ppm recorded without SCD4x: %v", last)
+	}
+	if limited := get("/v1/records?limit=1"); limited["count"] != 1.0 || limited["truncated"] != true {
+		t.Fatalf("%v", limited)
+	}
+}
+
+func TestRunRefusesUnwritableRecordFile(t *testing.T) {
+	t.Setenv("CONFIG_FILE", "")
+	t.Setenv("RECORD_FILE", filepath.Join(t.TempDir(), "missing", "readings.jsonl"))
+	t.Setenv("LISTEN_ADDR", "127.0.0.1:0")
+	if got := run(nil); got != 1 {
+		t.Fatalf("run=%d", got)
 	}
 }

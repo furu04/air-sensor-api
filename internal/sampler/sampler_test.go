@@ -863,3 +863,92 @@ func TestSplitBusReinitReopensAllBuses(t *testing.T) {
 		t.Fatalf("%+v", h.sm.Snapshot())
 	}
 }
+
+type fakeRecorder struct {
+	rows []store.Reading
+	err  error
+}
+
+func (f *fakeRecorder) Record(r store.Reading) error {
+	if f.err != nil {
+		return f.err
+	}
+	f.rows = append(f.rows, r)
+	return nil
+}
+
+func recorderHarness(rec Recorder) *harness {
+	h := newHarness(0)
+	h.sm.cfg.Recorder = rec
+	return h
+}
+
+func TestRecorderReceivesEverySavedSample(t *testing.T) {
+	fr := &fakeRecorder{}
+	h := recorderHarness(fr)
+	for i := 0; i < 3; i++ {
+		h.tick()
+	}
+	if len(fr.rows) != 3 || h.st.Len() != 3 {
+		t.Fatalf("recorded=%d stored=%d", len(fr.rows), h.st.Len())
+	}
+	latest, _ := h.st.Latest()
+	if fr.rows[2] != latest {
+		t.Fatalf("%+v != %+v", fr.rows[2], latest)
+	}
+}
+
+func TestRecorderNotCalledForFailedSample(t *testing.T) {
+	fr := &fakeRecorder{}
+	h := recorderHarness(fr)
+	h.sess.measureErr = errors.New("aht21: i2c transfer")
+	h.tick()
+	if len(fr.rows) != 0 || h.st.Len() != 0 {
+		t.Fatalf("recorded=%d stored=%d", len(fr.rows), h.st.Len())
+	}
+}
+
+func TestRecorderFailureDoesNotFailSample(t *testing.T) {
+	fr := &fakeRecorder{err: errors.New("disk full")}
+	h := recorderHarness(fr)
+	for i := 0; i < reinitEvery+1; i++ {
+		h.tick()
+	}
+	snap := h.sm.Snapshot()
+	if h.st.Len() != reinitEvery+1 || snap.ConsecutiveFailures != 0 || snap.TotalFailures != 0 || snap.Reinits != 0 || !snap.HasLastSuccess {
+		t.Fatalf("stored=%d %+v", h.st.Len(), snap)
+	}
+	if h.sess.closeCalls != 0 {
+		t.Fatal("session must not be reinitialised because of a recorder failure")
+	}
+}
+
+func TestRecorderFailureLoggedSparselyAndRecovery(t *testing.T) {
+	fr := &fakeRecorder{err: errors.New("disk full")}
+	h := recorderHarness(fr)
+	for i := 0; i < 6; i++ {
+		h.tick()
+	}
+	out := h.logs.String()
+	if n := strings.Count(out, "msg=\"record failed\""); n != 2 {
+		t.Fatalf("record failed logged %d times\n%s", n, out)
+	}
+	fr.err = nil
+	h.tick()
+	out = h.logs.String()
+	if !strings.Contains(out, "msg=\"record recovered\"") || !strings.Contains(out, "after=6") {
+		t.Fatalf("%s", out)
+	}
+	h.tick()
+	if n := strings.Count(h.logs.String(), "record recovered"); n != 1 {
+		t.Fatalf("recovered logged %d times", n)
+	}
+}
+
+func TestNoRecorderByDefault(t *testing.T) {
+	h := newHarness(0)
+	h.tick()
+	if h.st.Len() != 1 {
+		t.Fatal("sample not stored")
+	}
+}

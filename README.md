@@ -108,7 +108,7 @@ SCD4X_BUS=1
 ```
 
 - 省略したキーは既定値（または環境変数）になる。
-- 使えるキー：`listen_addr`、`i2c_bus`、`interval`、`temp_offset`、`history_size`、`stale_after`、`no_crc`、`sensors.{aht21,ens160}.{enabled,addr,bus}`、`sensors.scd4x.{enabled,bus}`。それぞれ同名の環境変数（大文字、`sensors.` 配下は上の表のとおり）と同じ意味と制約を持つ。
+- 使えるキー：`listen_addr`、`i2c_bus`、`interval`、`temp_offset`、`history_size`、`stale_after`、`no_crc`、`record_file`、`sensors.{aht21,ens160}.{enabled,addr,bus}`、`sensors.scd4x.{enabled,bus}`。それぞれ同名の環境変数（大文字、`sensors.` 配下は上の表のとおり）と同じ意味と制約を持つ。
 - 未知のキー、型の違い、JSON の後ろの余分な内容、64 KiB を超えるファイルはエラーで、起動しない。
 - **`API_TOKEN` は設定ファイルに書けない**（書くと未知のキーとして拒否される）。0600 の環境変数ファイルに置く。
 - `addr` は `"0x38"` のような文字列でも、10 進の数値でもよい。SCD4x のアドレスは `0x62` 固定で、`addr` キーは無い。`bus` は整数。
@@ -132,6 +132,7 @@ SCD4X_BUS=1
 | `STALE_AFTER` | `3 × INTERVAL` | `INTERVAL` 以上 |
 | `NO_CRC` | `false` | AHT21 の CRC 検査を止める。SCD4x の CRC 検査は止められない |
 | `CONFIG_FILE` | 未設定 | JSON 設定ファイルのパス。環境変数でのみ指定できる |
+| `RECORD_FILE` | 未設定 | 記録先の絶対パス。指定したときだけ、サンプルを JSON Lines で追記する（後述） |
 | `API_TOKEN` | 未設定 | 設定すると `/healthz` 以外で `Authorization: Bearer <token>` を要求。16 文字以上 |
 
 ## エンドポイント
@@ -142,8 +143,56 @@ SCD4X_BUS=1
 |---|---|
 | `/v1/readings/latest` | 最新の 1 件。無ければ `503`（`no_data`） |
 | `/v1/readings` | 履歴。`window`、`since`、`limit`、`valid_only` |
+| `/v1/records` | 記録ファイルの内容（`RECORD_FILE` 指定時のみ。後述） |
 | `/v1/status` | サンプラーの状態、バージョン、ソースの場所、有効なセンサーのアドレス |
 | `/healthz` | `200` か `503`（`text/plain`）。認証不要 |
+
+## 記録（任意）
+
+既定では、履歴はメモリ上の直近 `HISTORY_SIZE` 件だけで、再起動で消える。`RECORD_FILE` に絶対パスを指定すると、サンプルを保存するたびに 1 行の JSON をそのファイルへ追記し（JSON Lines）、`/v1/records` で読み出せる。
+
+```
+RECORD_FILE=/var/lib/air-sensor-api/readings.jsonl
+```
+
+```json
+{"ts":"2026-11-11T05:45:04Z","temp_c":23.64,"rh_pct":37,"aqi":1,"tvoc_ppb":24,"eco2_ppm":400,"co2_ppm":527,"validity":2,"validity_name":"initial_startup","valid":false}
+```
+
+- キーは `/v1/readings` の各要素から `age_seconds` を除いたもの。有効なセンサーの項目だけが出る。`valid` が `false` の行も記録するので、使う側で絞る。
+- 記録先のディレクトリは作らない。サービスが書き込めること。unit は `ProtectSystem=strict` なので、ドロップインで書き込み先を許可する。
+  ```
+  # systemctl edit air-sensor-api
+  [Service]
+  StateDirectory=air-sensor-api
+  ```
+  `/var/lib/air-sensor-api` が作られ、`air-sensor` ユーザーの所有になる。
+- 起動時に記録先を開けないと、起動を拒否する。実行中の書き込み失敗は、警告ログを出すだけで、サンプリングは止めない。
+- ローテーションはしない。logrotate で回す。サンプルごとにファイルを開き直すので、`copytruncate` は要らない。
+  ```
+  /var/lib/air-sensor-api/readings.jsonl {
+      weekly
+      rotate 8
+      compress
+      missingok
+      notifempty
+  }
+  ```
+- `fsync` はしない。SD カードの摩耗を抑える代わりに、電源断で直近の数行を失いうる。60 秒間隔で 1 行が約 200 バイト、1 日で約 300 KB。
+- 読み出しは現在のファイルだけ（ローテーション済みのファイルは読まない）。
+
+```bash
+curl -s -H "Authorization: Bearer $API_TOKEN" \
+  'http://127.0.0.1:8080/v1/records?since=2026-11-11T00:00:00Z&until=2026-11-12T00:00:00Z&limit=500'
+```
+
+| クエリ | 内容 |
+|---|---|
+| `since` | RFC 3339。この時刻**以上** |
+| `until` | RFC 3339。この時刻**より前** |
+| `limit` | 1〜5000、既定 1000 |
+
+応答は `{"count": N, "truncated": false, "records": [...]}`。古い方から `limit` 件を返し、まだ続きがあるときだけ `truncated` が `true` になる。続きは、最後の `ts` の 1 秒後を `since` にして取る。ファイルは先頭から順に走査するので、巨大になった記録は logrotate で分ける。`RECORD_FILE` が未指定なら `404`。
 
 ## SCD40 / SCD41（任意）
 

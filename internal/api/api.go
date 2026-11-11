@@ -4,6 +4,7 @@
 package api
 
 import (
+	"context"
 	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/json"
@@ -14,17 +15,24 @@ import (
 	"strings"
 	"time"
 
+	"github.com/furu04/air-sensor-api/internal/readingjson"
 	"github.com/furu04/air-sensor-api/internal/sampler"
 	"github.com/furu04/air-sensor-api/internal/store"
 )
 
 const (
 	defaultLimit        = 100
+	defaultRecordLimit  = 1000
+	maxRecordLimit      = 5000
 	failingThreshold    = 5
 	ens160PartIDDisplay = "0x0160"
 )
 
 type Sampler interface{ Snapshot() sampler.Snapshot }
+
+type RecordSource interface {
+	Read(ctx context.Context, since, until time.Time, limit int) ([]json.RawMessage, bool, error)
+}
 
 type Config struct {
 	Version    string
@@ -35,6 +43,7 @@ type Config struct {
 	AHT21Addr  uint8
 	SCD4xAddr  uint8
 	Token      string
+	Records    RecordSource
 }
 
 type handler struct {
@@ -62,35 +71,29 @@ type errorDetail struct {
 	Message string `json:"message"`
 }
 
-type measurements struct {
-	TempC        *float64 `json:"temp_c,omitempty"`
-	RHPct        *float64 `json:"rh_pct,omitempty"`
-	AQI          *int     `json:"aqi,omitempty"`
-	TVOCPPB      *int     `json:"tvoc_ppb,omitempty"`
-	ECO2PPM      *int     `json:"eco2_ppm,omitempty"`
-	CO2PPM       *int     `json:"co2_ppm,omitempty"`
-	Validity     *int     `json:"validity,omitempty"`
-	ValidityName string   `json:"validity_name,omitempty"`
-	Valid        bool     `json:"valid"`
-}
-
 type latestBody struct {
 	TS         string  `json:"ts"`
 	AgeSeconds float64 `json:"age_seconds"`
 	Stale      bool    `json:"stale"`
-	measurements
+	readingjson.Measurements
 }
 
 type readingItem struct {
 	TS         string  `json:"ts"`
 	AgeSeconds float64 `json:"age_seconds"`
-	measurements
+	readingjson.Measurements
 }
 
 type readingsBody struct {
 	Count           int           `json:"count"`
 	IntervalSeconds int           `json:"interval_seconds"`
 	Readings        []readingItem `json:"readings"`
+}
+
+type recordsBody struct {
+	Count     int               `json:"count"`
+	Truncated bool              `json:"truncated"`
+	Records   []json.RawMessage `json:"records"`
 }
 
 type historyBody struct {
@@ -157,6 +160,8 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.latest(w, r)
 	case "/v1/readings":
 		h.readings(w, r)
+	case "/v1/records":
+		h.records(w, r)
 	case "/v1/status":
 		h.status(w, r)
 	case "/healthz":
@@ -206,26 +211,6 @@ func ageAt(now time.Duration, r store.Reading) time.Duration {
 
 func round1(x float64) float64 { return math.Round(x*10) / 10 }
 
-func measurementsOf(r store.Reading) measurements {
-	m := measurements{Valid: r.Valid()}
-	if r.HasClimate {
-		t, rh := r.TempC, r.RHPct
-		m.TempC, m.RHPct = &t, &rh
-	}
-	if r.HasGas {
-		aqi, tvoc, eco2, validity := r.AQI, r.TVOCPPB, r.ECO2PPM, r.Validity
-		m.AQI, m.TVOCPPB, m.ECO2PPM, m.Validity = &aqi, &tvoc, &eco2, &validity
-		m.ValidityName = r.ValidityName()
-	}
-	if r.HasCO2 {
-		co2 := r.CO2PPM
-		m.CO2PPM = &co2
-	}
-	return m
-}
-
-func formatTS(r store.Reading) string { return r.Wall.UTC().Format(time.RFC3339) }
-
 func (h *handler) latest(w http.ResponseWriter, r *http.Request) {
 	rd, ok := h.st.Latest()
 	if !ok {
@@ -234,10 +219,10 @@ func (h *handler) latest(w http.ResponseWriter, r *http.Request) {
 	}
 	age := ageAt(h.clock.Mono(), rd)
 	h.writeJSON(w, r, http.StatusOK, latestBody{
-		TS:           formatTS(rd),
+		TS:           readingjson.FormatTS(rd),
 		AgeSeconds:   round1(age.Seconds()),
 		Stale:        age > h.cfg.StaleAfter,
-		measurements: measurementsOf(rd),
+		Measurements: readingjson.Of(rd),
 	})
 }
 
@@ -305,9 +290,9 @@ func (h *handler) readings(w http.ResponseWriter, r *http.Request) {
 	items := make([]readingItem, 0, len(rows))
 	for _, rd := range rows {
 		items = append(items, readingItem{
-			TS:           formatTS(rd),
+			TS:           readingjson.FormatTS(rd),
 			AgeSeconds:   round1(ageAt(now, rd).Seconds()),
-			measurements: measurementsOf(rd),
+			Measurements: readingjson.Of(rd),
 		})
 	}
 	h.writeJSON(w, r, http.StatusOK, readingsBody{
@@ -315,6 +300,63 @@ func (h *handler) readings(w http.ResponseWriter, r *http.Request) {
 		IntervalSeconds: int(h.cfg.Interval / time.Second),
 		Readings:        items,
 	})
+}
+
+func parseTimeParam(r *http.Request, key string) (time.Time, error) {
+	v, ok := firstParam(r, key)
+	if !ok {
+		return time.Time{}, nil
+	}
+	t, err := time.Parse(time.RFC3339, v)
+	if err != nil {
+		return time.Time{}, fmt.Errorf("%s: %v", key, err)
+	}
+	return t, nil
+}
+
+func (h *handler) parseRecordQuery(r *http.Request) (since, until time.Time, limit int, err error) {
+	limit = defaultRecordLimit
+	if since, err = parseTimeParam(r, "since"); err != nil {
+		return
+	}
+	if until, err = parseTimeParam(r, "until"); err != nil {
+		return
+	}
+	if !since.IsZero() && !until.IsZero() && !since.Before(until) {
+		err = fmt.Errorf("since must be earlier than until")
+		return
+	}
+	if v, ok := firstParam(r, "limit"); ok {
+		var n int
+		if n, err = strconv.Atoi(v); err != nil {
+			err = fmt.Errorf("limit: %v", err)
+			return
+		}
+		if n < 1 || n > maxRecordLimit {
+			err = fmt.Errorf("limit: must be between 1 and %d", maxRecordLimit)
+			return
+		}
+		limit = n
+	}
+	return
+}
+
+func (h *handler) records(w http.ResponseWriter, r *http.Request) {
+	if h.cfg.Records == nil {
+		h.writeError(w, r, http.StatusNotFound, "not_found", "recording is not enabled")
+		return
+	}
+	since, until, limit, err := h.parseRecordQuery(r)
+	if err != nil {
+		h.writeError(w, r, http.StatusBadRequest, "bad_request", err.Error())
+		return
+	}
+	rows, truncated, err := h.cfg.Records.Read(r.Context(), since, until, limit)
+	if err != nil {
+		h.writeError(w, r, http.StatusInternalServerError, "record_read_failed", "could not read the record file")
+		return
+	}
+	h.writeJSON(w, r, http.StatusOK, recordsBody{Count: len(rows), Truncated: truncated, Records: rows})
 }
 
 func (h *handler) status(w http.ResponseWriter, r *http.Request) {

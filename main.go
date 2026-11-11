@@ -19,6 +19,7 @@ import (
 	"github.com/furu04/air-sensor-api/internal/api"
 	"github.com/furu04/air-sensor-api/internal/config"
 	"github.com/furu04/air-sensor-api/internal/i2c"
+	"github.com/furu04/air-sensor-api/internal/recorder"
 	"github.com/furu04/air-sensor-api/internal/sampler"
 	"github.com/furu04/air-sensor-api/internal/scd4x"
 	"github.com/furu04/air-sensor-api/internal/store"
@@ -87,7 +88,18 @@ func run(args []string) int {
 		i2c.Open,
 		time.Sleep, openerOpts...,
 	)
-	sm := sampler.New(open, st, sampler.Config{Interval: cfg.Interval, TempOffset: cfg.TempOffset}, clock, log)
+	samplerCfg := sampler.Config{Interval: cfg.Interval, TempOffset: cfg.TempOffset}
+	if cfg.RecordFile != "" {
+		rec, err := recorder.New(cfg.RecordFile)
+		if err != nil {
+			log.Error("record file unavailable", "path", cfg.RecordFile, "err", err)
+			return 1
+		}
+		samplerCfg.Recorder = rec
+		apiCfg.Records = rec
+		log.Info("recording enabled", "path", cfg.RecordFile)
+	}
+	sm := sampler.New(open, st, samplerCfg, clock, log)
 
 	ln, err := net.Listen("tcp", cfg.ListenAddr)
 	if err != nil {

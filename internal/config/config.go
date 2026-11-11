@@ -8,6 +8,7 @@ import (
 	"math"
 	"net"
 	"os"
+	"path/filepath"
 	"strconv"
 	"time"
 
@@ -31,6 +32,7 @@ type Config struct {
 	StaleAfter   time.Duration
 	NoCRC        bool
 	APIToken     string
+	RecordFile   string
 }
 
 func Load(getenv func(string) string) (Config, error) {
@@ -207,6 +209,13 @@ func LoadWith(getenv func(string) string, readFile func(string) ([]byte, error))
 			return Config{}, fmt.Errorf("NO_CRC: %v", err)
 		}
 		cfg.NoCRC = b
+	}
+
+	if v := get("RECORD_FILE"); v != "" {
+		if !filepath.IsAbs(v) {
+			return Config{}, fmt.Errorf("RECORD_FILE: %q must be an absolute path", v)
+		}
+		cfg.RecordFile = filepath.Clean(v)
 	}
 
 	if v := getenv("API_TOKEN"); v != "" {

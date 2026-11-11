@@ -368,3 +368,37 @@ func TestAddressConflictsOnlyOnSameBus(t *testing.T) {
 		t.Fatalf("%+v %v", c, err)
 	}
 }
+
+func TestRecordFile(t *testing.T) {
+	c, err := Load(env(nil))
+	if err != nil || c.RecordFile != "" {
+		t.Fatalf("default: %+v %v", c, err)
+	}
+	c, err = Load(env(map[string]string{"RECORD_FILE": "/var/lib/air-sensor-api/../air-sensor-api/readings.jsonl"}))
+	if err != nil || c.RecordFile != "/var/lib/air-sensor-api/readings.jsonl" {
+		t.Fatalf("%+v %v", c, err)
+	}
+	c, err = loadFile(`{"record_file": "/var/lib/air-sensor-api/readings.jsonl"}`, nil)
+	if err != nil || c.RecordFile != "/var/lib/air-sensor-api/readings.jsonl" {
+		t.Fatalf("file: %+v %v", c, err)
+	}
+	c, err = loadFile(`{"record_file": "/a/file.jsonl"}`, map[string]string{"RECORD_FILE": "/b/file.jsonl"})
+	if err != nil || c.RecordFile != "/b/file.jsonl" {
+		t.Fatalf("env must override the file: %+v %v", c, err)
+	}
+}
+
+func TestRecordFileMustBeAbsolute(t *testing.T) {
+	for _, v := range []string{"readings.jsonl", "./readings.jsonl", "../x"} {
+		_, err := Load(env(map[string]string{"RECORD_FILE": v}))
+		if err == nil || !strings.HasPrefix(err.Error(), "RECORD_FILE: ") {
+			t.Errorf("%s: err=%v", v, err)
+		}
+	}
+	if _, err := loadFile(`{"record_file": "rel.jsonl"}`, nil); err == nil || !strings.HasPrefix(err.Error(), "RECORD_FILE: ") {
+		t.Fatalf("err=%v", err)
+	}
+	if _, err := loadFile(`{"record_file": 5}`, nil); err == nil {
+		t.Fatal("record_file must be a string")
+	}
+}

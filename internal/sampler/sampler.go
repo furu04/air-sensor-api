@@ -225,9 +225,14 @@ type Snapshot struct {
 	LastSuccessMono     time.Duration
 }
 
+type Recorder interface {
+	Record(store.Reading) error
+}
+
 type Config struct {
 	Interval   time.Duration
 	TempOffset float64
+	Recorder   Recorder
 }
 
 type Sampler struct {
@@ -236,6 +241,8 @@ type Sampler struct {
 	cfg   Config
 	clock store.Clock
 	log   *slog.Logger
+
+	recordFailures int
 
 	mu                  sync.Mutex
 	session             Session
@@ -341,7 +348,25 @@ func (s *Sampler) Tick() {
 	rd.Wall = s.clock.Now()
 	rd.Mono = s.clock.Mono()
 	s.store.Add(rd)
+	s.record(rd)
 	s.success()
+}
+
+func (s *Sampler) record(rd store.Reading) {
+	if s.cfg.Recorder == nil {
+		return
+	}
+	if err := s.cfg.Recorder.Record(rd); err != nil {
+		s.recordFailures++
+		if n := s.recordFailures; n == 1 || n%reinitEvery == 0 {
+			s.log.Warn("record failed", "err", err, "consecutive", n)
+		}
+		return
+	}
+	if s.recordFailures > 0 {
+		s.log.Info("record recovered", "after", s.recordFailures)
+		s.recordFailures = 0
+	}
 }
 
 func (s *Sampler) fail(err error, msg string) int {
