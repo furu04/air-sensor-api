@@ -53,8 +53,41 @@ type ensSource struct{ s *ens160.Sensor }
 func (e ensSource) Compensate(t, rh float64) error { return e.s.Compensate(t, rh) }
 func (e ensSource) ReadGas() (ens160.Data, error)  { return e.s.Read() }
 
+type busSet struct {
+	open  func(bus int) (i2c.Bus, error)
+	byNum map[int]i2c.Bus
+	order []i2c.Bus
+}
+
+func newBusSet(open func(bus int) (i2c.Bus, error)) *busSet {
+	return &busSet{open: open, byNum: map[int]i2c.Bus{}}
+}
+
+func (b *busSet) get(num int) (i2c.Bus, error) {
+	if bus, ok := b.byNum[num]; ok {
+		return bus, nil
+	}
+	bus, err := b.open(num)
+	if err != nil {
+		return nil, fmt.Errorf("open bus %d: %w", num, err)
+	}
+	b.byNum[num] = bus
+	b.order = append(b.order, bus)
+	return bus, nil
+}
+
+func (b *busSet) Close() error {
+	var errs []error
+	for _, bus := range b.order {
+		if err := bus.Close(); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	return errors.Join(errs...)
+}
+
 type session struct {
-	bus     i2c.Bus
+	buses   *busSet
 	climate ClimateSource
 	gas     GasSource
 	co2     CO2Source
@@ -63,7 +96,7 @@ type session struct {
 func (s *session) Climate() ClimateSource { return s.climate }
 func (s *session) Gas() GasSource         { return s.gas }
 func (s *session) CO2() CO2Source         { return s.co2 }
-func (s *session) Close() error           { return s.bus.Close() }
+func (s *session) Close() error           { return s.buses.Close() }
 
 type scdSource struct {
 	sensor *scd4x.Sensor
@@ -95,33 +128,36 @@ func (s *scdSource) ReadCO2() (int, error) {
 
 type openerOptions struct {
 	aht21     bool
+	ahtBus    int
 	ahtAddr   uint8
 	checkCRC  bool
 	ens160    bool
+	ensBus    int
 	ensAddr   uint8
 	scd4x     bool
+	scd4xBus  int
 	scd4xAddr uint8
 }
 
 type OpenerOption func(*openerOptions)
 
-func WithAHT21(addr uint8, checkCRC bool) OpenerOption {
+func WithAHT21(bus int, addr uint8, checkCRC bool) OpenerOption {
 	return func(o *openerOptions) {
-		o.aht21, o.ahtAddr, o.checkCRC = true, addr, checkCRC
+		o.aht21, o.ahtBus, o.ahtAddr, o.checkCRC = true, bus, addr, checkCRC
 	}
 }
 
-func WithENS160(addr uint8) OpenerOption {
-	return func(o *openerOptions) { o.ens160, o.ensAddr = true, addr }
+func WithENS160(bus int, addr uint8) OpenerOption {
+	return func(o *openerOptions) { o.ens160, o.ensBus, o.ensAddr = true, bus, addr }
 }
 
-func WithSCD4x(addr uint8) OpenerOption {
-	return func(o *openerOptions) { o.scd4x, o.scd4xAddr = true, addr }
+func WithSCD4x(bus int, addr uint8) OpenerOption {
+	return func(o *openerOptions) { o.scd4x, o.scd4xBus, o.scd4xAddr = true, bus, addr }
 }
 
 var ErrNoSensors = errors.New("no sensors configured")
 
-func NewOpener(open func() (i2c.Bus, error), sleep func(time.Duration), opts ...OpenerOption) OpenFunc {
+func NewOpener(open func(bus int) (i2c.Bus, error), sleep func(time.Duration), opts ...OpenerOption) OpenFunc {
 	var o openerOptions
 	for _, opt := range opts {
 		opt(&o)
@@ -130,32 +166,42 @@ func NewOpener(open func() (i2c.Bus, error), sleep func(time.Duration), opts ...
 		if !o.aht21 && !o.ens160 && !o.scd4x {
 			return nil, ErrNoSensors
 		}
-		bus, err := open()
-		if err != nil {
-			return nil, fmt.Errorf("open bus: %w", err)
+		buses := newBusSet(open)
+		abort := func(err error) (Session, error) {
+			buses.Close()
+			return nil, err
 		}
-		sess := &session{bus: bus}
+		sess := &session{buses: buses}
 		if o.aht21 {
+			bus, err := buses.get(o.ahtBus)
+			if err != nil {
+				return abort(err)
+			}
 			aht := aht21.New(bus, o.ahtAddr, o.checkCRC, sleep)
 			if err := aht.Init(); err != nil {
-				bus.Close()
-				return nil, fmt.Errorf("init aht21: %w", err)
+				return abort(fmt.Errorf("init aht21: %w", err))
 			}
 			sess.climate = aht
 		}
 		if o.ens160 {
+			bus, err := buses.get(o.ensBus)
+			if err != nil {
+				return abort(err)
+			}
 			ens := ens160.New(bus, o.ensAddr)
 			if err := ens.Init(); err != nil {
-				bus.Close()
-				return nil, fmt.Errorf("init ens160: %w", err)
+				return abort(fmt.Errorf("init ens160: %w", err))
 			}
 			sess.gas = ensSource{ens}
 		}
 		if o.scd4x {
+			bus, err := buses.get(o.scd4xBus)
+			if err != nil {
+				return abort(err)
+			}
 			scd := scd4x.New(bus, o.scd4xAddr, sleep)
 			if err := scd.Init(); err != nil {
-				bus.Close()
-				return nil, fmt.Errorf("init scd4x: %w", err)
+				return abort(fmt.Errorf("init scd4x: %w", err))
 			}
 			src := &scdSource{sensor: scd}
 			sess.co2 = src

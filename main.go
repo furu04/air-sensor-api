@@ -58,6 +58,9 @@ func run(args []string) int {
 		"aht21", cfg.AHT21Enable,
 		"ens160", cfg.ENS160Enable,
 		"scd4x", cfg.SCD4xEnable,
+		"aht21_bus", cfg.AHT21Bus,
+		"ens160_bus", cfg.ENS160Bus,
+		"scd4x_bus", cfg.SCD4xBus,
 	)
 
 	if cfg.ExposedWithoutToken() {
@@ -69,19 +72,19 @@ func run(args []string) int {
 	var openerOpts []sampler.OpenerOption
 	var apiCfg api.Config
 	if cfg.AHT21Enable {
-		openerOpts = append(openerOpts, sampler.WithAHT21(cfg.AHT21Addr, !cfg.NoCRC))
+		openerOpts = append(openerOpts, sampler.WithAHT21(cfg.AHT21Bus, cfg.AHT21Addr, !cfg.NoCRC))
 		apiCfg.AHT21Addr = cfg.AHT21Addr
 	}
 	if cfg.ENS160Enable {
-		openerOpts = append(openerOpts, sampler.WithENS160(cfg.ENS160Addr))
+		openerOpts = append(openerOpts, sampler.WithENS160(cfg.ENS160Bus, cfg.ENS160Addr))
 		apiCfg.ENS160Addr = cfg.ENS160Addr
 	}
 	if cfg.SCD4xEnable {
-		openerOpts = append(openerOpts, sampler.WithSCD4x(scd4x.DefaultAddr))
+		openerOpts = append(openerOpts, sampler.WithSCD4x(cfg.SCD4xBus, scd4x.DefaultAddr))
 		apiCfg.SCD4xAddr = scd4x.DefaultAddr
 	}
 	open := sampler.NewOpener(
-		func() (i2c.Bus, error) { return i2c.Open(cfg.I2CBus) },
+		i2c.Open,
 		time.Sleep, openerOpts...,
 	)
 	sm := sampler.New(open, st, sampler.Config{Interval: cfg.Interval, TempOffset: cfg.TempOffset}, clock, log)

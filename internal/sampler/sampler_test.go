@@ -312,7 +312,7 @@ func TestNewOpener(t *testing.T) {
 	sim := i2ctest.New()
 	sim.SetClimate(25, 50)
 	sim.SetGas(3, 300, 400, 0)
-	open := NewOpener(func() (i2c.Bus, error) { return sim, nil }, func(time.Duration) {}, WithAHT21(0x38, true), WithENS160(0x53))
+	open := NewOpener(func(int) (i2c.Bus, error) { return sim, nil }, func(time.Duration) {}, WithAHT21(1, 0x38, true), WithENS160(1, 0x53))
 	sess, err := open()
 	if err != nil {
 		t.Fatal(err)
@@ -341,7 +341,7 @@ func TestNewOpener(t *testing.T) {
 func TestNewOpenerPartIDMismatch(t *testing.T) {
 	sim := i2ctest.New()
 	sim.SetPartID(0x0161)
-	open := NewOpener(func() (i2c.Bus, error) { return sim, nil }, func(time.Duration) {}, WithAHT21(0x38, true), WithENS160(0x53))
+	open := NewOpener(func(int) (i2c.Bus, error) { return sim, nil }, func(time.Duration) {}, WithAHT21(1, 0x38, true), WithENS160(1, 0x53))
 	sess, err := open()
 	if err == nil || sess != nil {
 		t.Fatalf("sess=%v err=%v", sess, err)
@@ -352,7 +352,7 @@ func TestNewOpenerPartIDMismatch(t *testing.T) {
 }
 
 func TestNewOpenerBusFailure(t *testing.T) {
-	open := NewOpener(func() (i2c.Bus, error) { return nil, errors.New("no bus") }, func(time.Duration) {}, WithAHT21(0x38, true), WithENS160(0x53))
+	open := NewOpener(func(int) (i2c.Bus, error) { return nil, errors.New("no bus") }, func(time.Duration) {}, WithAHT21(1, 0x38, true), WithENS160(1, 0x53))
 	sess, err := open()
 	if err == nil || sess != nil {
 		t.Fatalf("sess=%v err=%v", sess, err)
@@ -429,14 +429,14 @@ func TestCO2FailureTriggersReinit(t *testing.T) {
 }
 
 func opener(sim *i2ctest.Sim, opts ...OpenerOption) OpenFunc {
-	return NewOpener(func() (i2c.Bus, error) { return sim, nil }, func(time.Duration) {}, opts...)
+	return NewOpener(func(int) (i2c.Bus, error) { return sim, nil }, func(time.Duration) {}, opts...)
 }
 
 func TestNewOpenerWithSCD4x(t *testing.T) {
 	sim := i2ctest.New()
 	sim.EnableSCD4x()
 	sim.SetCO2(1500)
-	sess, err := opener(sim, WithAHT21(0x38, true), WithENS160(0x53), WithSCD4x(0x62))()
+	sess, err := opener(sim, WithAHT21(1, 0x38, true), WithENS160(1, 0x53), WithSCD4x(1, 0x62))()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -455,7 +455,7 @@ func TestNewOpenerWithSCD4x(t *testing.T) {
 func TestNewOpenerSCD4xOnly(t *testing.T) {
 	sim := i2ctest.New()
 	sim.EnableSCD4x()
-	sess, err := opener(sim, WithSCD4x(0x62))()
+	sess, err := opener(sim, WithSCD4x(1, 0x62))()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -477,7 +477,7 @@ func TestNewOpenerSCD4xOnly(t *testing.T) {
 func TestNewOpenerOmitsDisabled(t *testing.T) {
 	sim := i2ctest.New()
 	sim.EnableSCD4x()
-	sess, err := opener(sim, WithAHT21(0x38, true), WithENS160(0x53))()
+	sess, err := opener(sim, WithAHT21(1, 0x38, true), WithENS160(1, 0x53))()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -487,7 +487,7 @@ func TestNewOpenerOmitsDisabled(t *testing.T) {
 	if sim.SCDMeasuring() {
 		t.Fatal("SCD4x touched although not requested")
 	}
-	sess, err = opener(sim, WithENS160(0x53))()
+	sess, err = opener(sim, WithENS160(1, 0x53))()
 	if err != nil || sess.Climate() != nil || sess.Gas() == nil {
 		t.Fatalf("err=%v", err)
 	}
@@ -505,7 +505,7 @@ func TestNewOpenerNoSensors(t *testing.T) {
 
 func TestNewOpenerSCD4xAbsent(t *testing.T) {
 	sim := i2ctest.New()
-	sess, err := opener(sim, WithAHT21(0x38, true), WithENS160(0x53), WithSCD4x(0x62))()
+	sess, err := opener(sim, WithAHT21(1, 0x38, true), WithENS160(1, 0x53), WithSCD4x(1, 0x62))()
 	if err == nil || sess != nil {
 		t.Fatalf("sess=%v err=%v", sess, err)
 	}
@@ -577,7 +577,7 @@ func readMeasurementCount(sim *i2ctest.Sim) int {
 
 func simHarness(sim *i2ctest.Sim, offset float64, opts ...OpenerOption) *harness {
 	h := newHarness(offset)
-	open := NewOpener(func() (i2c.Bus, error) { return sim, nil }, func(time.Duration) {}, opts...)
+	open := NewOpener(func(int) (i2c.Bus, error) { return sim, nil }, func(time.Duration) {}, opts...)
 	h.sm.open = open
 	return h
 }
@@ -587,7 +587,7 @@ func TestSCD4xSuppliesClimateWhenAHT21Disabled(t *testing.T) {
 	sim.EnableSCD4x()
 	sim.SetSCDClimate(24.0, 41.0)
 	sim.SetCO2(910)
-	h := simHarness(sim, -1.5, WithSCD4x(0x62))
+	h := simHarness(sim, -1.5, WithSCD4x(1, 0x62))
 	h.tick()
 	r, ok := h.st.Latest()
 	if !ok || !r.HasClimate || !r.HasCO2 || r.CO2PPM != 910 {
@@ -601,7 +601,7 @@ func TestSCD4xSuppliesClimateWhenAHT21Disabled(t *testing.T) {
 func TestSCD4xReadOncePerTick(t *testing.T) {
 	sim := i2ctest.New()
 	sim.EnableSCD4x()
-	h := simHarness(sim, 0, WithSCD4x(0x62))
+	h := simHarness(sim, 0, WithSCD4x(1, 0x62))
 	for i := 1; i <= 3; i++ {
 		h.tick()
 		if n := readMeasurementCount(sim); n != i {
@@ -616,7 +616,7 @@ func TestAHT21WinsOverSCD4xClimate(t *testing.T) {
 	sim.SetClimate(21, 55)
 	sim.SetSCDClimate(30, 20)
 	sim.SetCO2(700)
-	h := simHarness(sim, 0, WithAHT21(0x38, true), WithENS160(0x53), WithSCD4x(0x62))
+	h := simHarness(sim, 0, WithAHT21(1, 0x38, true), WithENS160(1, 0x53), WithSCD4x(1, 0x62))
 	h.tick()
 	r, ok := h.st.Latest()
 	if !ok || r.TempC != 21 || r.RHPct != 55 || r.CO2PPM != 700 {
@@ -631,7 +631,7 @@ func TestENS160CompensatedFromSCD4xClimate(t *testing.T) {
 	sim := i2ctest.New()
 	sim.EnableSCD4x()
 	sim.SetSCDClimate(20, 40)
-	h := simHarness(sim, 0, WithENS160(0x53), WithSCD4x(0x62))
+	h := simHarness(sim, 0, WithENS160(1, 0x53), WithSCD4x(1, 0x62))
 	h.tick()
 	tin, rhin := sim.Compensation()
 	if wantT := uint16(math.Round((20 + 273.15) * 64)); tin < wantT-2 || tin > wantT+2 {
@@ -646,7 +646,7 @@ func TestSCD4xSampleNotReusedAfterLaterFailure(t *testing.T) {
 	sim := i2ctest.New()
 	sim.EnableSCD4x()
 	sim.SetCO2(500)
-	h := simHarness(sim, 0, WithENS160(0x53), WithSCD4x(0x62))
+	h := simHarness(sim, 0, WithENS160(1, 0x53), WithSCD4x(1, 0x62))
 	sim.SetStatusError(true)
 	h.tick()
 	if h.st.Len() != 0 {
@@ -664,7 +664,7 @@ func TestSCD4xSampleNotReusedAfterLaterFailure(t *testing.T) {
 func TestSCD4xMeasureFailure(t *testing.T) {
 	sim := i2ctest.New()
 	sim.EnableSCD4x()
-	h := simHarness(sim, 0, WithSCD4x(0x62))
+	h := simHarness(sim, 0, WithSCD4x(1, 0x62))
 	h.tick()
 	sim.SetSCDBadCRC(true)
 	h.tick()
@@ -709,5 +709,157 @@ func TestHumidityClampedBeforeRescale(t *testing.T) {
 	r, _ := h.st.Latest()
 	if r.RHPct != 100 {
 		t.Fatalf("rh=%v", r.RHPct)
+	}
+}
+
+type busRouter struct {
+	sims  map[int]*i2ctest.Sim
+	opens map[int]int
+}
+
+func newBusRouter(sims map[int]*i2ctest.Sim) *busRouter {
+	return &busRouter{sims: sims, opens: map[int]int{}}
+}
+
+func (r *busRouter) open(bus int) (i2c.Bus, error) {
+	r.opens[bus]++
+	sim, ok := r.sims[bus]
+	if !ok {
+		return nil, fmt.Errorf("no such bus %d", bus)
+	}
+	return sim, nil
+}
+
+func addrsTouched(sim *i2ctest.Sim) map[uint8]bool {
+	out := map[uint8]bool{}
+	for _, w := range sim.Writes() {
+		out[w.Addr] = true
+	}
+	for _, r := range sim.Reads() {
+		out[r.Addr] = true
+	}
+	return out
+}
+
+func TestNewOpenerSplitBuses(t *testing.T) {
+	envBus, scdBus := i2ctest.New(), i2ctest.New()
+	envBus.SetClimate(22, 45)
+	envBus.SetGas(3, 120, 600, 0)
+	scdBus.EnableSCD4x()
+	scdBus.SetSCDClimate(30, 20)
+	scdBus.SetCO2(1100)
+	router := newBusRouter(map[int]*i2ctest.Sim{10: envBus, 1: scdBus})
+
+	h := newHarness(0)
+	h.sm.open = NewOpener(router.open, func(time.Duration) {}, WithAHT21(10, 0x38, true), WithENS160(10, 0x53), WithSCD4x(1, 0x62))
+	h.tick()
+
+	r, ok := h.st.Latest()
+	if !ok || r.TempC != 22 || r.RHPct != 45 || r.AQI != 3 || r.CO2PPM != 1100 {
+		t.Fatalf("%+v %v", r, ok)
+	}
+	if router.opens[10] != 1 || router.opens[1] != 1 {
+		t.Fatalf("opens=%v", router.opens)
+	}
+	if touched := addrsTouched(envBus); touched[0x62] || !touched[0x38] || !touched[0x53] {
+		t.Fatalf("bus 10 touched %v", touched)
+	}
+	if touched := addrsTouched(scdBus); touched[0x38] || touched[0x53] || !touched[0x62] {
+		t.Fatalf("bus 1 touched %v", touched)
+	}
+	if envBus.CloseCount() != 0 || scdBus.CloseCount() != 0 {
+		t.Fatal("buses closed while the session is alive")
+	}
+	if err := h.sm.currentSession().Close(); err != nil {
+		t.Fatal(err)
+	}
+	if envBus.CloseCount() != 1 || scdBus.CloseCount() != 1 {
+		t.Fatalf("close env=%d scd=%d", envBus.CloseCount(), scdBus.CloseCount())
+	}
+}
+
+func TestNewOpenerSharedBusOpenedOnce(t *testing.T) {
+	sim := i2ctest.New()
+	sim.EnableSCD4x()
+	router := newBusRouter(map[int]*i2ctest.Sim{3: sim})
+	sess, err := NewOpener(router.open, func(time.Duration) {}, WithAHT21(3, 0x38, true), WithENS160(3, 0x53), WithSCD4x(3, 0x62))()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if router.opens[3] != 1 {
+		t.Fatalf("opens=%v", router.opens)
+	}
+	if err := sess.Close(); err != nil || sim.CloseCount() != 1 {
+		t.Fatalf("close=%d err=%v", sim.CloseCount(), err)
+	}
+}
+
+func TestNewOpenerUnusedBusNotOpened(t *testing.T) {
+	sim := i2ctest.New()
+	router := newBusRouter(map[int]*i2ctest.Sim{10: sim})
+	sess, err := NewOpener(router.open, func(time.Duration) {}, WithAHT21(10, 0x38, true), WithENS160(10, 0x53))()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(router.opens) != 1 || router.opens[10] != 1 {
+		t.Fatalf("opens=%v", router.opens)
+	}
+	sess.Close()
+}
+
+func TestNewOpenerSecondBusOpenFailureClosesFirst(t *testing.T) {
+	envBus := i2ctest.New()
+	router := newBusRouter(map[int]*i2ctest.Sim{10: envBus})
+	sess, err := NewOpener(router.open, func(time.Duration) {}, WithAHT21(10, 0x38, true), WithENS160(10, 0x53), WithSCD4x(1, 0x62))()
+	if err == nil || sess != nil {
+		t.Fatalf("sess=%v err=%v", sess, err)
+	}
+	if !strings.Contains(err.Error(), "open bus 1") {
+		t.Fatalf("err=%v", err)
+	}
+	if envBus.CloseCount() != 1 {
+		t.Fatalf("close=%d", envBus.CloseCount())
+	}
+}
+
+func TestNewOpenerSensorInitFailureClosesAllBuses(t *testing.T) {
+	envBus, scdBus := i2ctest.New(), i2ctest.New()
+	router := newBusRouter(map[int]*i2ctest.Sim{10: envBus, 1: scdBus})
+	sess, err := NewOpener(router.open, func(time.Duration) {}, WithAHT21(10, 0x38, true), WithSCD4x(1, 0x62))()
+	if err == nil || sess != nil || !strings.Contains(err.Error(), "init scd4x") {
+		t.Fatalf("sess=%v err=%v", sess, err)
+	}
+	if envBus.CloseCount() != 1 || scdBus.CloseCount() != 1 {
+		t.Fatalf("close env=%d scd=%d", envBus.CloseCount(), scdBus.CloseCount())
+	}
+}
+
+func TestSplitBusReinitReopensAllBuses(t *testing.T) {
+	envBus, scdBus := i2ctest.New(), i2ctest.New()
+	scdBus.EnableSCD4x()
+	router := newBusRouter(map[int]*i2ctest.Sim{10: envBus, 1: scdBus})
+	h := newHarness(0)
+	h.sm.open = NewOpener(router.open, func(time.Duration) {}, WithAHT21(10, 0x38, true), WithSCD4x(1, 0x62))
+	h.tick()
+	if _, ok := h.st.Latest(); !ok {
+		t.Fatal("no sample")
+	}
+	scdBus.SetUnplugged(true)
+	for i := 0; i < reinitEvery; i++ {
+		h.tick()
+	}
+	if h.sm.Snapshot().Reinits != 1 {
+		t.Fatalf("%+v", h.sm.Snapshot())
+	}
+	if envBus.CloseCount() != 1 || scdBus.CloseCount() != 1 {
+		t.Fatalf("close env=%d scd=%d", envBus.CloseCount(), scdBus.CloseCount())
+	}
+	scdBus.SetUnplugged(false)
+	h.tick()
+	if router.opens[10] != 2 || router.opens[1] < 2 {
+		t.Fatalf("opens=%v", router.opens)
+	}
+	if h.sm.Snapshot().ConsecutiveFailures != 0 {
+		t.Fatalf("%+v", h.sm.Snapshot())
 	}
 }

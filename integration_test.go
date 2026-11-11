@@ -5,6 +5,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -24,7 +25,7 @@ func TestIntegration(t *testing.T) {
 
 	clock := store.NewSystemClock()
 	st := store.New(100, clock)
-	open := sampler.NewOpener(func() (i2c.Bus, error) { return sim, nil }, func(time.Duration) {}, sampler.WithAHT21(0x38, true), sampler.WithENS160(0x53))
+	open := sampler.NewOpener(func(int) (i2c.Bus, error) { return sim, nil }, func(time.Duration) {}, sampler.WithAHT21(1, 0x38, true), sampler.WithENS160(1, 0x53))
 	sm := sampler.New(open, st, sampler.Config{Interval: 10 * time.Second}, clock, nil)
 	h := api.New(st, sm, clock, api.Config{
 		Version:    "test",
@@ -95,7 +96,7 @@ func TestIntegrationSCD4x(t *testing.T) {
 
 	clock := store.NewSystemClock()
 	st := store.New(100, clock)
-	open := sampler.NewOpener(func() (i2c.Bus, error) { return sim, nil }, func(time.Duration) {}, sampler.WithAHT21(0x38, true), sampler.WithENS160(0x53), sampler.WithSCD4x(0x62))
+	open := sampler.NewOpener(func(int) (i2c.Bus, error) { return sim, nil }, func(time.Duration) {}, sampler.WithAHT21(1, 0x38, true), sampler.WithENS160(1, 0x53), sampler.WithSCD4x(1, 0x62))
 	sm := sampler.New(open, st, sampler.Config{Interval: 10 * time.Second}, clock, nil)
 	h := api.New(st, sm, clock, api.Config{
 		Interval:   10 * time.Second,
@@ -145,7 +146,7 @@ func TestIntegrationSCD4xDisabledLeavesSensorAlone(t *testing.T) {
 	sim.EnableSCD4x()
 	clock := store.NewSystemClock()
 	st := store.New(10, clock)
-	open := sampler.NewOpener(func() (i2c.Bus, error) { return sim, nil }, func(time.Duration) {}, sampler.WithAHT21(0x38, true), sampler.WithENS160(0x53))
+	open := sampler.NewOpener(func(int) (i2c.Bus, error) { return sim, nil }, func(time.Duration) {}, sampler.WithAHT21(1, 0x38, true), sampler.WithENS160(1, 0x53))
 	sm := sampler.New(open, st, sampler.Config{Interval: 10 * time.Second}, clock, nil)
 	sm.Tick()
 	if rd, ok := st.Latest(); !ok || rd.HasCO2 {
@@ -161,7 +162,7 @@ func TestIntegrationSCD4xDisabledLeavesSensorAlone(t *testing.T) {
 func TestNoSensorStaysUp(t *testing.T) {
 	clock := store.NewSystemClock()
 	st := store.New(10, clock)
-	open := sampler.NewOpener(func() (i2c.Bus, error) { return i2c.Open(250) }, func(time.Duration) {}, sampler.WithAHT21(0x38, true), sampler.WithENS160(0x53))
+	open := sampler.NewOpener(func(int) (i2c.Bus, error) { return i2c.Open(250) }, func(time.Duration) {}, sampler.WithAHT21(1, 0x38, true), sampler.WithENS160(1, 0x53))
 	sm := sampler.New(open, st, sampler.Config{Interval: 10 * time.Second}, clock, nil)
 	h := api.New(st, sm, clock, api.Config{Interval: 10 * time.Second, StaleAfter: time.Hour, ENS160Addr: 0x53, AHT21Addr: 0x38})
 
@@ -207,9 +208,14 @@ func TestRunArgs(t *testing.T) {
 
 func newStack(t *testing.T, sim *i2ctest.Sim, cfg api.Config, opts ...sampler.OpenerOption) (*sampler.Sampler, func(string) map[string]any) {
 	t.Helper()
+	return newStackOn(t, func(int) (i2c.Bus, error) { return sim, nil }, cfg, opts...)
+}
+
+func newStackOn(t *testing.T, openBus func(int) (i2c.Bus, error), cfg api.Config, opts ...sampler.OpenerOption) (*sampler.Sampler, func(string) map[string]any) {
+	t.Helper()
 	clock := store.NewSystemClock()
 	st := store.New(100, clock)
-	open := sampler.NewOpener(func() (i2c.Bus, error) { return sim, nil }, func(time.Duration) {}, opts...)
+	open := sampler.NewOpener(openBus, func(time.Duration) {}, opts...)
 	sm := sampler.New(open, st, sampler.Config{Interval: 10 * time.Second}, clock, nil)
 	cfg.Interval, cfg.StaleAfter = 10*time.Second, time.Hour
 	h := api.New(st, sm, clock, cfg)
@@ -231,7 +237,7 @@ func TestIntegrationSCD4xOnly(t *testing.T) {
 	sim := i2ctest.New()
 	sim.EnableSCD4x()
 	sim.SetCO2(780)
-	sm, get := newStack(t, sim, api.Config{SCD4xAddr: 0x62}, sampler.WithSCD4x(0x62))
+	sm, get := newStack(t, sim, api.Config{SCD4xAddr: 0x62}, sampler.WithSCD4x(1, 0x62))
 	sm.Tick()
 	m := get("/v1/readings/latest")
 	if m["co2_ppm"] != 780.0 || m["valid"] != true || m["temp_c"] != 25.0 || m["rh_pct"] != 50.0 {
@@ -264,7 +270,7 @@ func TestIntegrationSCD4xOnly(t *testing.T) {
 func TestIntegrationENS160WithoutAHT21(t *testing.T) {
 	sim := i2ctest.New()
 	sim.SetGas(2, 40, 420, 0)
-	sm, get := newStack(t, sim, api.Config{ENS160Addr: 0x53}, sampler.WithENS160(0x53))
+	sm, get := newStack(t, sim, api.Config{ENS160Addr: 0x53}, sampler.WithENS160(1, 0x53))
 	sm.Tick()
 	m := get("/v1/readings/latest")
 	if m["aqi"] != 2.0 || m["tvoc_ppb"] != 40.0 || m["valid"] != true {
@@ -283,7 +289,7 @@ func TestIntegrationAHT21WithSCD4x(t *testing.T) {
 	sim.EnableSCD4x()
 	sim.SetClimate(23, 45)
 	sim.SetCO2(900)
-	sm, get := newStack(t, sim, api.Config{AHT21Addr: 0x38, SCD4xAddr: 0x62}, sampler.WithAHT21(0x38, true), sampler.WithSCD4x(0x62))
+	sm, get := newStack(t, sim, api.Config{AHT21Addr: 0x38, SCD4xAddr: 0x62}, sampler.WithAHT21(1, 0x38, true), sampler.WithSCD4x(1, 0x62))
 	sm.Tick()
 	m := get("/v1/readings/latest")
 	if m["temp_c"] != 23.0 || m["co2_ppm"] != 900.0 {
@@ -300,11 +306,51 @@ func TestIntegrationSCD4xClimateWithTempOffset(t *testing.T) {
 	sim.SetSCDClimate(27.0, 38.0)
 	clock := store.NewSystemClock()
 	st := store.New(10, clock)
-	open := sampler.NewOpener(func() (i2c.Bus, error) { return sim, nil }, func(time.Duration) {}, sampler.WithSCD4x(0x62))
+	open := sampler.NewOpener(func(int) (i2c.Bus, error) { return sim, nil }, func(time.Duration) {}, sampler.WithSCD4x(1, 0x62))
 	sm := sampler.New(open, st, sampler.Config{Interval: 10 * time.Second, TempOffset: -3}, clock, nil)
 	sm.Tick()
 	rd, ok := st.Latest()
 	if !ok || rd.TempC != 24 || rd.RHPct != 45.4 || !rd.HasClimate {
 		t.Fatalf("%+v %v", rd, ok)
+	}
+}
+
+func TestIntegrationSplitBuses(t *testing.T) {
+	envBus, scdBus := i2ctest.New(), i2ctest.New()
+	envBus.SetClimate(23, 45)
+	envBus.SetGas(2, 80, 500, 0)
+	scdBus.EnableSCD4x()
+	scdBus.SetSCDClimate(31, 18)
+	scdBus.SetCO2(1250)
+	buses := map[int]*i2ctest.Sim{10: envBus, 1: scdBus}
+	openBus := func(n int) (i2c.Bus, error) {
+		if sim, ok := buses[n]; ok {
+			return sim, nil
+		}
+		return nil, errors.New("no such bus")
+	}
+	sm, get := newStackOn(t, openBus,
+		api.Config{AHT21Addr: 0x38, ENS160Addr: 0x53, SCD4xAddr: 0x62},
+		sampler.WithAHT21(10, 0x38, true), sampler.WithENS160(10, 0x53), sampler.WithSCD4x(1, 0x62))
+	sm.Tick()
+	m := get("/v1/readings/latest")
+	if m["temp_c"] != 23.0 || m["rh_pct"] != 45.0 || m["aqi"] != 2.0 || m["co2_ppm"] != 1250.0 || m["valid"] != true {
+		t.Fatalf("%v", m)
+	}
+	st := get("/v1/status")
+	for _, k := range []string{"aht21", "ens160", "scd4x"} {
+		if _, ok := st[k]; !ok {
+			t.Errorf("%s missing from status: %v", k, st)
+		}
+	}
+	for _, w := range envBus.Writes() {
+		if w.Addr == 0x62 {
+			t.Fatalf("SCD4x touched on the wrong bus: %+v", w)
+		}
+	}
+	for _, w := range scdBus.Writes() {
+		if w.Addr == 0x38 || w.Addr == 0x53 {
+			t.Fatalf("AHT21/ENS160 touched on the wrong bus: %+v", w)
+		}
 	}
 }

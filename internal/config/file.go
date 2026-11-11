@@ -35,16 +35,18 @@ func (a *addrValue) UnmarshalJSON(b []byte) error {
 type sensorFile struct {
 	Enabled *bool      `json:"enabled"`
 	Addr    *addrValue `json:"addr"`
+	Bus     *int       `json:"bus"`
 }
 
-type enableOnlyFile struct {
+type fixedAddrSensorFile struct {
 	Enabled *bool `json:"enabled"`
+	Bus     *int  `json:"bus"`
 }
 
 type sensorsFile struct {
-	AHT21  *sensorFile     `json:"aht21"`
-	ENS160 *sensorFile     `json:"ens160"`
-	SCD4x  *enableOnlyFile `json:"scd4x"`
+	AHT21  *sensorFile          `json:"aht21"`
+	ENS160 *sensorFile          `json:"ens160"`
+	SCD4x  *fixedAddrSensorFile `json:"scd4x"`
 }
 
 type fileConfig struct {
@@ -87,12 +89,13 @@ func parseFile(data []byte) (map[string]string, error) {
 	str("INTERVAL", fc.Interval)
 	str("STALE_AFTER", fc.StaleAfter)
 	flag("NO_CRC", fc.NoCRC)
-	if fc.I2CBus != nil {
-		out["I2C_BUS"] = strconv.Itoa(*fc.I2CBus)
+	integer := func(key string, v *int) {
+		if v != nil {
+			out[key] = strconv.Itoa(*v)
+		}
 	}
-	if fc.HistorySize != nil {
-		out["HISTORY_SIZE"] = strconv.Itoa(*fc.HistorySize)
-	}
+	integer("I2C_BUS", fc.I2CBus)
+	integer("HISTORY_SIZE", fc.HistorySize)
 	if fc.TempOffset != nil {
 		out["TEMP_OFFSET"] = strconv.FormatFloat(*fc.TempOffset, 'g', -1, 64)
 	}
@@ -105,12 +108,14 @@ func parseFile(data []byte) (map[string]string, error) {
 				continue
 			}
 			flag(e.prefix+"_ENABLE", e.f.Enabled)
+			integer(e.prefix+"_BUS", e.f.Bus)
 			if e.f.Addr != nil {
 				out[e.prefix+"_ADDR"] = string(*e.f.Addr)
 			}
 		}
 		if fc.Sensors.SCD4x != nil {
 			flag("SCD4X_ENABLE", fc.Sensors.SCD4x.Enabled)
+			integer("SCD4X_BUS", fc.Sensors.SCD4x.Bus)
 		}
 	}
 	return out, nil

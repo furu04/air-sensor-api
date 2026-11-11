@@ -75,6 +75,22 @@ curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:8080/healthz
 - ENS160 を無効にすると、`aqi`・`tvoc_ppb`・`eco2_ppm`・`validity`・`validity_name` が出なくなり、`valid` は常に `true` になる。
 - SCD4x を有効にすると `co2_ppm` が出る（後述）。
 
+### センサーごとにバスを分ける
+
+センサーが別々の I2C バスにつながっているとき（例：AHT21 と ENS160 が `/dev/i2c-10`、SCD4x が `/dev/i2c-1`）は、センサーごとにバスを指定する。
+
+```
+AHT21_BUS=10
+ENS160_BUS=10
+SCD4X_BUS=1
+```
+
+- 指定しないセンサーは `I2C_BUS`（既定 `1`）を使う。`I2C_BUS` だけの従来の設定は、そのまま動く。
+- 同じバス番号のセンサーは、バスを 1 回だけ開いて共有する。有効なセンサーが使わないバスは開かない。
+- どのバスが開けなくても、どのバス上のセンサーが読めなくても、そのサンプル全体を保存しない。5 回連続で失敗すると、すべてのバスを閉じて開き直す。
+- 事前に `i2cdetect -y <バス番号>` で、各センサーのアドレスがそのバスに見えることを確かめる。
+- `/v1/status` にバス番号は出ない。
+
 ### 設定ファイル（JSON）
 
 `CONFIG_FILE` にパスを指定したときだけ読む。systemd なら `/etc/air-sensor-api/env` に `CONFIG_FILE=/etc/air-sensor-api/config.json` と書く。
@@ -84,18 +100,18 @@ curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:8080/healthz
   "interval": "60s",
   "temp_offset": -1.5,
   "sensors": {
-    "aht21":  { "enabled": true, "addr": "0x38" },
-    "ens160": { "enabled": true, "addr": "0x53" },
-    "scd4x":  { "enabled": true }
+    "aht21":  { "enabled": true, "addr": "0x38", "bus": 10 },
+    "ens160": { "enabled": true, "addr": "0x53", "bus": 10 },
+    "scd4x":  { "enabled": true, "bus": 1 }
   }
 }
 ```
 
 - 省略したキーは既定値（または環境変数）になる。
-- 使えるキー：`listen_addr`、`i2c_bus`、`interval`、`temp_offset`、`history_size`、`stale_after`、`no_crc`、`sensors.{aht21,ens160}.{enabled,addr}`、`sensors.scd4x.enabled`。それぞれ同名の環境変数（大文字、`sensors.` 配下は上の表のとおり）と同じ意味と制約を持つ。
+- 使えるキー：`listen_addr`、`i2c_bus`、`interval`、`temp_offset`、`history_size`、`stale_after`、`no_crc`、`sensors.{aht21,ens160}.{enabled,addr,bus}`、`sensors.scd4x.{enabled,bus}`。それぞれ同名の環境変数（大文字、`sensors.` 配下は上の表のとおり）と同じ意味と制約を持つ。
 - 未知のキー、型の違い、JSON の後ろの余分な内容、64 KiB を超えるファイルはエラーで、起動しない。
 - **`API_TOKEN` は設定ファイルに書けない**（書くと未知のキーとして拒否される）。0600 の環境変数ファイルに置く。
-- `addr` は `"0x38"` のような文字列でも、10 進の数値でもよい。SCD4x のアドレスは `0x62` 固定で、`addr` キーは無い。
+- `addr` は `"0x38"` のような文字列でも、10 進の数値でもよい。SCD4x のアドレスは `0x62` 固定で、`addr` キーは無い。`bus` は整数。
 - JSON はコメントを書けない。説明を残したいときは、設定ファイルを置くディレクトリに別の README を置く。
 
 ### 環境変数
@@ -105,9 +121,10 @@ curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:8080/healthz
 | 変数 | 既定 | 内容 |
 |---|---|---|
 | `LISTEN_ADDR` | `127.0.0.1:8080` | 待ち受け。全インターフェースなら `0.0.0.0:8080` か `:8080` を明示 |
-| `I2C_BUS` | `1` | 0〜255 |
+| `I2C_BUS` | `1` | 0〜255。センサー別に指定しないセンサーが使うバス |
+| `AHT21_BUS` / `ENS160_BUS` / `SCD4X_BUS` | `I2C_BUS` の値 | 0〜255。そのセンサーだけが使うバス（次節） |
 | `ENS160_ADDR` | `0x53` | `0x52` か `0x53` |
-| `AHT21_ADDR` | `0x38` | `0x08`〜`0x77`。有効なセンサー同士で重複しないこと（`ENS160_ADDR` と別。SCD4x が有効なら `0x62` 以外） |
+| `AHT21_ADDR` | `0x38` | `0x08`〜`0x77`。同じバスの有効なセンサー同士で重複しないこと（`ENS160_ADDR` と別。SCD4x が有効なら `0x62` 以外。バスが違えば重複してよい） |
 | `AHT21_ENABLE` / `ENS160_ENABLE` / `SCD4X_ENABLE` | `true` / `true` / `false` | センサーの有効化。`true`・`1` など |
 | `INTERVAL` | `60s` | 整数秒、5 秒以上 1 時間以下 |
 | `TEMP_OFFSET` | `0` | ℃、−20〜20。`temp_c` と ENS160 への補正の両方に反映 |

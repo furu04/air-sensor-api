@@ -107,6 +107,12 @@ func TestInvalid(t *testing.T) {
 		{"bus negative", map[string]string{"I2C_BUS": "-1"}, "I2C_BUS"},
 		{"scd4x garbage", map[string]string{"SCD4X_ENABLE": "maybe"}, "SCD4X_ENABLE"},
 		{"scd4x aht conflict", map[string]string{"SCD4X_ENABLE": "true", "AHT21_ADDR": "0x62"}, "AHT21_ADDR"},
+		{"aht bus range", map[string]string{"AHT21_BUS": "256"}, "AHT21_BUS"},
+		{"ens bus negative", map[string]string{"ENS160_BUS": "-1"}, "ENS160_BUS"},
+		{"scd bus garbage", map[string]string{"SCD4X_BUS": "x"}, "SCD4X_BUS"},
+		{"disabled sensor bus range", map[string]string{"SCD4X_BUS": "300"}, "SCD4X_BUS"},
+		{"same bus conflict", map[string]string{"AHT21_BUS": "10", "ENS160_BUS": "10", "ENS160_ADDR": "0x52", "AHT21_ADDR": "0x52"}, "AHT21_ADDR"},
+		{"same bus scd conflict", map[string]string{"SCD4X_ENABLE": "true", "SCD4X_BUS": "10", "AHT21_BUS": "10", "AHT21_ADDR": "0x62"}, "AHT21_ADDR"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -301,6 +307,64 @@ func TestFileNotReadWithoutPath(t *testing.T) {
 func TestAPITokenOnlyFromEnv(t *testing.T) {
 	c, err := loadFile(`{}`, map[string]string{"API_TOKEN": "0123456789abcdef"})
 	if err != nil || c.APIToken != "0123456789abcdef" {
+		t.Fatalf("%+v %v", c, err)
+	}
+}
+
+func TestSensorBusDefaultsFollowI2CBus(t *testing.T) {
+	c, err := Load(env(nil))
+	if err != nil || c.AHT21Bus != 1 || c.ENS160Bus != 1 || c.SCD4xBus != 1 {
+		t.Fatalf("%+v %v", c, err)
+	}
+	c, err = Load(env(map[string]string{"I2C_BUS": "10"}))
+	if err != nil || c.I2CBus != 10 || c.AHT21Bus != 10 || c.ENS160Bus != 10 || c.SCD4xBus != 10 {
+		t.Fatalf("%+v %v", c, err)
+	}
+}
+
+func TestSensorBusOverride(t *testing.T) {
+	c, err := Load(env(map[string]string{"AHT21_BUS": "10", "ENS160_BUS": "10", "SCD4X_ENABLE": "true"}))
+	if err != nil || c.I2CBus != 1 || c.AHT21Bus != 10 || c.ENS160Bus != 10 || c.SCD4xBus != 1 {
+		t.Fatalf("%+v %v", c, err)
+	}
+	c, err = Load(env(map[string]string{"I2C_BUS": "10", "SCD4X_BUS": "1", "SCD4X_ENABLE": "true"}))
+	if err != nil || c.AHT21Bus != 10 || c.ENS160Bus != 10 || c.SCD4xBus != 1 {
+		t.Fatalf("%+v %v", c, err)
+	}
+}
+
+func TestFileSensorBus(t *testing.T) {
+	c, err := loadFile(`{"sensors": {
+		"aht21": {"enabled": true, "bus": 10},
+		"ens160": {"enabled": true, "bus": 10},
+		"scd4x": {"enabled": true, "bus": 1}
+	}}`, nil)
+	if err != nil || c.I2CBus != 1 || c.AHT21Bus != 10 || c.ENS160Bus != 10 || c.SCD4xBus != 1 {
+		t.Fatalf("%+v %v", c, err)
+	}
+	c, err = loadFile(`{"i2c_bus": 10, "sensors": {"scd4x": {"enabled": true, "bus": 1}}}`, nil)
+	if err != nil || c.AHT21Bus != 10 || c.ENS160Bus != 10 || c.SCD4xBus != 1 {
+		t.Fatalf("%+v %v", c, err)
+	}
+	c, err = loadFile(`{"sensors": {"aht21": {"bus": 10}}}`, map[string]string{"AHT21_BUS": "4"})
+	if err != nil || c.AHT21Bus != 4 {
+		t.Fatalf("env must override the file: %+v %v", c, err)
+	}
+	if _, err = loadFile(`{"sensors": {"scd4x": {"addr": "0x62"}}}`, nil); err == nil {
+		t.Fatal("scd4x addr must stay rejected")
+	}
+	if _, err = loadFile(`{"sensors": {"aht21": {"bus": "10"}}}`, nil); err == nil {
+		t.Fatal("bus must be an integer")
+	}
+}
+
+func TestAddressConflictsOnlyOnSameBus(t *testing.T) {
+	c, err := Load(env(map[string]string{"AHT21_BUS": "10", "ENS160_ADDR": "0x52", "AHT21_ADDR": "0x52"}))
+	if err != nil || c.AHT21Addr != 0x52 || c.ENS160Addr != 0x52 {
+		t.Fatalf("%+v %v", c, err)
+	}
+	c, err = Load(env(map[string]string{"SCD4X_ENABLE": "true", "AHT21_BUS": "10", "AHT21_ADDR": "0x62"}))
+	if err != nil || c.AHT21Addr != 0x62 || !c.SCD4xEnable {
 		t.Fatalf("%+v %v", c, err)
 	}
 }

@@ -17,6 +17,9 @@ import (
 type Config struct {
 	ListenAddr   string
 	I2CBus       int
+	AHT21Bus     int
+	ENS160Bus    int
+	SCD4xBus     int
 	AHT21Enable  bool
 	ENS160Enable bool
 	SCD4xEnable  bool
@@ -68,15 +71,35 @@ func LoadWith(getenv func(string) string, readFile func(string) ([]byte, error))
 		cfg.ListenAddr = v
 	}
 
-	if v := get("I2C_BUS"); v != "" {
+	parseBus := func(key string, def int) (int, error) {
+		v := get(key)
+		if v == "" {
+			return def, nil
+		}
 		n, err := strconv.Atoi(v)
 		if err != nil {
-			return Config{}, fmt.Errorf("I2C_BUS: %v", err)
+			return 0, fmt.Errorf("%s: %v", key, err)
 		}
 		if n < 0 || n > 255 {
-			return Config{}, fmt.Errorf("I2C_BUS: %d out of range 0-255", n)
+			return 0, fmt.Errorf("%s: %d out of range 0-255", key, n)
 		}
-		cfg.I2CBus = n
+		return n, nil
+	}
+	var err error
+	if cfg.I2CBus, err = parseBus("I2C_BUS", cfg.I2CBus); err != nil {
+		return Config{}, err
+	}
+	for _, e := range []struct {
+		key string
+		dst *int
+	}{
+		{"AHT21_BUS", &cfg.AHT21Bus},
+		{"ENS160_BUS", &cfg.ENS160Bus},
+		{"SCD4X_BUS", &cfg.SCD4xBus},
+	} {
+		if *e.dst, err = parseBus(e.key, cfg.I2CBus); err != nil {
+			return Config{}, err
+		}
 	}
 
 	for _, e := range []struct {
@@ -120,10 +143,10 @@ func LoadWith(getenv func(string) string, readFile func(string) ([]byte, error))
 		}
 		cfg.AHT21Addr = uint8(n)
 	}
-	if cfg.AHT21Enable && cfg.ENS160Enable && cfg.AHT21Addr == cfg.ENS160Addr {
+	if cfg.AHT21Enable && cfg.ENS160Enable && cfg.AHT21Bus == cfg.ENS160Bus && cfg.AHT21Addr == cfg.ENS160Addr {
 		return Config{}, fmt.Errorf("AHT21_ADDR: 0x%02X conflicts with ENS160_ADDR", cfg.AHT21Addr)
 	}
-	if cfg.AHT21Enable && cfg.SCD4xEnable && cfg.AHT21Addr == scd4x.DefaultAddr {
+	if cfg.AHT21Enable && cfg.SCD4xEnable && cfg.AHT21Bus == cfg.SCD4xBus && cfg.AHT21Addr == scd4x.DefaultAddr {
 		return Config{}, fmt.Errorf("AHT21_ADDR: 0x%02X conflicts with SCD4X (0x%02X)", cfg.AHT21Addr, scd4x.DefaultAddr)
 	}
 
